@@ -22,6 +22,12 @@ from src.models.enums import (
     Urgency,
 )
 from src.models.execution import GateValidation, LivePriceGate
+from src.models.paper import (
+    ExecutionRules,
+    PaperDashboard,
+    PaperPosition,
+    PaperSnapshot,
+)
 from src.models.market import EventCalendar, MarketContext, OptionsChain, PriceHistory
 from src.models.onboarding import (
     GapAnalysis,
@@ -82,4 +88,9 @@ __all__ = [
     # Execution
     "LivePriceGate",
     "GateValidation",
+    # Paper trading
+    "PaperPosition",
+    "PaperSnapshot",
+    "PaperDashboard",
+    "ExecutionRules",
 ]

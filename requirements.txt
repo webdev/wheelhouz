@@ -1,0 +1,28 @@
+# Core
+pyyaml>=6.0
+python-dotenv>=1.0
+structlog>=23.0
+
+# Broker APIs
+pyetrade>=2.0
+alpaca-py>=0.20
+
+# Market data
+yfinance>=0.2
+
+# Claude API
+anthropic>=0.40
+
+# Telegram
+python-telegram-bot>=20.0
+
+# Database
+asyncpg>=0.29
+psycopg2-binary>=2.9
+
+# Testing
+pytest>=7.0
+pytest-asyncio>=0.21
+
+# Type checking
+mypy>=1.8

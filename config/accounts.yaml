@@ -1,0 +1,46 @@
+# E*Trade account structure and routing rules
+accounts:
+  taxable:
+    account_type: taxable
+    options_level: 4
+    margin_enabled: true
+    can_short_stock: true
+    withdrawal_restricted: false
+    # Best for: Engine 1 long-term holds (LTCG), strangles, spreads,
+    # tax-loss harvesting, anything needing margin or Level 3+
+
+  roth_ira:
+    account_type: roth_ira
+    options_level: 2
+    margin_enabled: false
+    can_short_stock: false
+    withdrawal_restricted: true
+    early_withdrawal_penalty: 0.0  # contributions only; earnings locked until 59.5
+    # Best for: high-frequency premium income (tax-FREE)
+    # CSPs and covered calls only (Level 2)
+
+  traditional_ira:
+    account_type: traditional_ira
+    options_level: 2
+    margin_enabled: false
+    can_short_stock: false
+    withdrawal_restricted: true
+    early_withdrawal_penalty: 0.10
+    # Same strategies as Roth but less attractive (taxed on withdrawal)
+
+# Routing rules
+routing:
+  # High-frequency premium (weekly/monthly puts) → Roth FIRST
+  premium_income_priority: [roth_ira, traditional_ira, taxable]
+  # Strangles, spreads, earnings crush → Taxable ONLY
+  advanced_strategies_account: taxable
+  # Engine 1 long-term equity → Taxable (LTCG eligible)
+  long_term_holds_account: taxable
+  # Tax-loss harvesting → Taxable ONLY
+  tax_loss_harvesting_account: taxable
+
+# Liquidity constraints
+liquidity:
+  min_liquid_pct: 0.60
+  emergency_reserve_months: 6
+  monthly_expenses: 10000  # set during onboarding

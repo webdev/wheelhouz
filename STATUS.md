@@ -1,27 +1,42 @@
 # STATUS.md — Updated 2026-04-13
 
-## Current Sprint: Sprint 0 (Setup)
+## Current Sprint: Sprint 2 (Analysis Engine) — COMPLETE
 
-## Project Status: NOT STARTED — Ready to build
+## Project Status: Sprints 0-2 complete, ready for Sprint 3
 
-## Architecture Complete
+## Completed
 - [x] Full system spec: SPEC.md (8,700+ lines, 19 system components)
 - [x] Agent instructions: CLAUDE.md (Karpathy principles, all domain rules)
 - [x] Agent assignments: AGENTS.md (7 agents, parallel worktrees)
 - [x] Dashboard prototype: wheel-copilot-dashboard.jsx
 - [x] Financial projections: wheel-copilot-projection.jsx
 - [x] Shareable overview: wheel-copilot-overview.html
+- [x] `src/models/` — 10 shared model files, 38 exported symbols, Decimal for money
+- [x] `src/config/loader.py` — hot-reloadable config manager
+- [x] `config/trading_params.yaml` — signal thresholds, sizing, regime rules
+- [x] `config/accounts.yaml` — account types, levels, routing rules
+- [x] `config/watchlist.yaml` — 15 tickers to monitor
+- [x] `src/db/schema.sql` — Postgres schema (16 tables, all money as DECIMAL)
+- [x] `tests/fixtures/` — sample portfolio, market data, options chains, trades
+- [x] Sprint 1: Data Pipeline (`src/data/`) — auth, broker, market, events
+- [x] Sprint 2: Analysis Engine (`src/analysis/`) — signals, strikes, sizing, scanner, opportunities
+
+## Sprint 1 Details (Data Pipeline)
+- `src/data/auth.py` — E*Trade OAuth 1.0a, token persistence, interactive auth flow
+- `src/data/broker.py` — fetch_accounts, fetch_portfolio, fetch_quotes, fetch_option_chain
+- `src/data/market.py` — IV rank (252-day), RSI, SMAs, VIX, term structure via yfinance
+- `src/data/events.py` — earnings calendar, Fed meetings, ex-div dates
+- E*Trade sandbox authenticated and verified working
+
+## Sprint 2 Details (Analysis Engine)
+- `src/analysis/signals.py` — 13 alpha signal detectors + detect_all_signals aggregator
+- `src/analysis/strikes.py` — smart strike selection at technical levels
+- `src/analysis/sizing.py` — conviction-based sizing (HIGH/MEDIUM/LOW)
+- `src/analysis/scanner.py` — existing position scanner (6 actions)
+- `src/analysis/opportunities.py` — full pipeline: signals -> strikes -> sizing -> ranking
+- 33 tests passing, mypy clean on 34 source files
 
 ## Not Started
-- [ ] `src/models/` — shared data models (MUST be done first, any agent)
-- [ ] `src/config/loader.py` — hot-reloadable config manager
-- [ ] `config/trading_params.yaml` — signal thresholds, sizing, regime rules
-- [ ] `config/accounts.yaml` — account types, levels, routing rules
-- [ ] `config/watchlist.yaml` — tickers to monitor
-- [ ] `src/db/schema.sql` — Postgres schema (all tables)
-- [ ] `tests/fixtures/` — sample portfolio, market data, options chains, trades
-- [ ] Agent 1: Data Pipeline (`src/data/`)
-- [ ] Agent 2: Analysis Engine (`src/analysis/`)
 - [ ] Agent 3: Risk & Tax (`src/risk/`)
 - [ ] Agent 4: Execution (`src/execution/`)
 - [ ] Agent 5: Scout & Monitor (`src/scout/`, `src/monitor/`)
@@ -30,20 +45,17 @@
 - [ ] `src/main.py` — orchestrator
 
 ## Blocked
-- E*Trade API keys: apply at developer.etrade.com (sandbox + production)
 - Alpaca paper trading account: sign up at alpaca.markets (free)
 - Telegram bot token: create via @BotFather
 - Railway deployment: set up at railway.app ($5-10/mo)
 
 ## Known Issues
-- None yet
+- E*Trade sandbox balance endpoint returns errors (sandbox limitation, works in production)
+- `datetime.utcnow()` deprecation warnings — switch to `datetime.now(UTC)` in future pass
+- `test_data.py` requires `pyetrade` installed to collect
 
 ## Next Steps (in order)
-1. Apply for E*Trade API sandbox keys (takes 1-3 business days)
-2. Create Alpaca paper trading account (instant, free)
-3. Create Telegram bot via @BotFather (5 minutes)
-4. Set up git repo + 7 worktrees (see AGENTS.md)
-5. Any agent: commit shared models (`src/models/`) — 30 min task
-6. Any agent: commit config files + DB schema — 20 min task
-7. Any agent: commit test fixtures — 20 min task
-8. All 7 agents start Sprint 1 tasks in parallel
+1. Sprint 3: Briefing + Telegram + Onboarding module (`src/delivery/`)
+2. Sprint 4: Onboarding + Paper Trading (Alpaca)
+3. Create Alpaca paper trading account (instant, free)
+4. Create Telegram bot via @BotFather (5 minutes)

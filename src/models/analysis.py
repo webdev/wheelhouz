@@ -43,7 +43,7 @@ class SizedOpportunity:
     symbol: str
     trade_type: str
     strike: Decimal
-    expiration: date
+    expiration: date | None
     premium: Decimal
     contracts: int
     capital_deployed: Decimal

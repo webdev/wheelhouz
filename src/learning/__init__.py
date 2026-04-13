@@ -1,5 +1,10 @@
-"""Learning module — weekly self-tuning loop."""
+"""Learning module — weekly self-tuning loop and performance attribution."""
 
+from src.learning.attribution import (
+    PerformanceAttribution,
+    compute_attribution,
+    format_attribution,
+)
 from src.learning.loop import (
     Adjustment,
     LearningConfig,
@@ -10,6 +15,9 @@ from src.learning.loop import (
 )
 
 __all__ = [
+    "PerformanceAttribution",
+    "compute_attribution",
+    "format_attribution",
     "Adjustment",
     "LearningConfig",
     "LearningReport",

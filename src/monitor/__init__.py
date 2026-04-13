@@ -1,5 +1,18 @@
-"""Monitor module — regime detection, continuous tripwires, pre-market sentinel."""
+"""Monitor module — regime, tripwires, sentinel, bloodbath protocol."""
 
+from src.monitor.bloodbath import (
+    CrisisAction,
+    CrisisLevel,
+    EmployerCrisisAlert,
+    RecoveryAssessment,
+    SectorRepricingAnalysis,
+    assess_recovery,
+    check_employer_crisis,
+    detect_crisis_level,
+    detect_sector_repricing,
+    determine_crisis_actions,
+    format_crisis_alert,
+)
 from src.monitor.continuous import (
     MonitorState,
     TripwireConfig,
@@ -23,6 +36,17 @@ from src.monitor.sentinel import (
 )
 
 __all__ = [
+    "CrisisAction",
+    "CrisisLevel",
+    "EmployerCrisisAlert",
+    "RecoveryAssessment",
+    "SectorRepricingAnalysis",
+    "assess_recovery",
+    "check_employer_crisis",
+    "detect_crisis_level",
+    "detect_sector_repricing",
+    "determine_crisis_actions",
+    "format_crisis_alert",
     "MonitorState",
     "TripwireConfig",
     "TripwireEvent",

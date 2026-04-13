@@ -336,9 +336,10 @@ class TestWashSaleRepo:
 class TestAlpacaClient:
     def test_submit_and_fill(self) -> None:
         client = AlpacaPaperClient()
-        order = client.submit_order(
-            "AAPL230120P170", "sell_to_open", 2,
-            limit_price=Decimal("3.50"),
+        order = client.sell_to_open_option(
+            underlying="AAPL", expiration=date(2026, 5, 15),
+            option_type="put", strike=Decimal("170"),
+            quantity=2, limit_price=Decimal("3.50"),
         )
         assert order.status == "filled"
         assert order.filled_price == Decimal("3.50")
@@ -347,20 +348,30 @@ class TestAlpacaClient:
 
     def test_cancel_order(self) -> None:
         client = AlpacaPaperClient()
-        # Immediate fill, so cancel won't work on this one
-        order = client.submit_order("AAPL", "sell_to_open", 1, limit_price=Decimal("3.00"))
+        order = client.sell_to_open_option(
+            underlying="AAPL", expiration=date(2026, 5, 15),
+            option_type="put", strike=Decimal("170"),
+            quantity=1, limit_price=Decimal("3.00"),
+        )
         assert not client.cancel_order(order.order_id)  # already filled
 
     def test_cancel_all(self) -> None:
         client = AlpacaPaperClient()
-        # All orders fill immediately in paper mode
         count = client.cancel_all_orders()
         assert count == 0
 
     def test_close_position(self) -> None:
         client = AlpacaPaperClient()
-        client.submit_order("OPT1", "sell_to_open", 2, limit_price=Decimal("3.00"))
-        client.submit_order("OPT1", "buy_to_close", 2, limit_price=Decimal("1.50"))
+        client.sell_to_open_option(
+            underlying="OPT", expiration=date(2026, 5, 15),
+            option_type="put", strike=Decimal("100"),
+            quantity=2, limit_price=Decimal("3.00"),
+        )
+        client.buy_to_close_option(
+            underlying="OPT", expiration=date(2026, 5, 15),
+            option_type="put", strike=Decimal("100"),
+            quantity=2, limit_price=Decimal("1.50"),
+        )
         assert len(client.get_positions()) == 0
 
     def test_account_state(self) -> None:

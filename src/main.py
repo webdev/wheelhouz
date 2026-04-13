@@ -372,19 +372,154 @@ async def mode_briefing() -> None:
 
 
 async def mode_paper() -> None:
-    """Paper trading mode — runs full pipeline with simulated execution."""
-    from src.execution import PaperTrader
-    from src.models.paper import ExecutionRules
+    """Paper trading mode — runs signals then submits orders to Alpaca.
+
+    Uses real Alpaca paper API if ALPACA_API_KEY is set, otherwise
+    in-memory simulation. Either way, the full signal + sizing pipeline
+    runs on live yfinance data.
+    """
+    from datetime import date as date_type, timedelta
+
+    from src.analysis.sizing import size_position
+    from src.analysis.strikes import find_smart_strikes
+    from src.execution.alpaca_client import AlpacaPaperClient
+    from src.models.position import PortfolioState
 
     log.info("mode_paper_start")
-    trader = PaperTrader(rules=ExecutionRules())
 
-    result = await run_analysis_cycle("morning", always_push=True)
-    dashboard = trader.generate_dashboard()
-    log.info("paper_dashboard", **{
-        "trades": dashboard.total_trades,
-        "win_rate": f"{dashboard.win_rate:.0%}" if dashboard.win_rate else "N/A",
-    })
+    # 1. Connect to Alpaca
+    alpaca = AlpacaPaperClient()
+    acct = alpaca.get_account()
+    log.info("alpaca_account",
+             mode="LIVE API" if alpaca.is_live else "IN-MEMORY SIM",
+             equity=str(acct.equity), cash=str(acct.cash))
+
+    # 2. Run the full briefing pipeline (data + signals)
+    result = await run_analysis_cycle("paper_scan", always_push=True)
+
+    # 3. Re-fetch signals for order submission (briefing already printed them)
+    vix, spy_change = fetch_vix_and_spy()
+    symbols = load_watchlist()
+    watchlist_data = fetch_all_watchlist_data(symbols)
+
+    all_signals: list[AlphaSignal] = []
+    for symbol, mkt, hist, chain, cal in watchlist_data:
+        sigs = detect_all_signals(symbol, mkt, hist, chain, cal)
+        all_signals.extend(sigs)
+
+    if not all_signals:
+        print("\nNo signals fired — nothing to trade today.")
+        _print_alpaca_dashboard(alpaca)
+        return
+
+    # 4. Group signals by symbol and size positions
+    from collections import defaultdict
+    by_symbol: dict[str, list[AlphaSignal]] = defaultdict(list)
+    for s in all_signals:
+        by_symbol[s.symbol].append(s)
+
+    # Build a stub portfolio state from Alpaca account
+    portfolio = PortfolioState(
+        net_liquidation=acct.equity,
+        cash_available=acct.cash,
+        buying_power=acct.buying_power,
+    )
+
+    # Price data lookup
+    price_data = {sym: (mkt, hist, chain) for sym, mkt, hist, chain, _ in watchlist_data}
+
+    print(f"\n{'=' * 60}")
+    print(f"  PAPER TRADING — ORDER PROPOSALS")
+    print(f"{'=' * 60}")
+
+    orders_submitted = 0
+    for symbol, sigs in sorted(by_symbol.items(), key=lambda x: -max(s.strength for s in x[1])):
+        if symbol not in price_data:
+            continue
+
+        mkt, hist, chain = price_data[symbol]
+
+        # Find best strike at a technical level
+        strikes = find_smart_strikes(symbol, chain, hist, "sell_put")
+        if not strikes:
+            log.info("no_strikes_found", symbol=symbol)
+            print(f"\n  {symbol}: signals fired but no valid strikes found")
+            continue
+
+        best_strike = strikes[0]
+
+        # Pick expiration ~30 DTE
+        target_exp = date_type.today() + timedelta(days=30)
+
+        # Size the position
+        sized = size_position(
+            symbol=symbol,
+            trade_type="sell_put",
+            strike=best_strike,
+            expiration=target_exp,
+            signals=sigs,
+            portfolio=portfolio,
+        )
+
+        # Print proposal
+        sig_names = ", ".join(s.signal_type.value for s in sigs)
+        print(f"\n  {symbol} — {sized.conviction.upper()} conviction")
+        print(f"    Signals: {sig_names}")
+        print(f"    Strike:  ${best_strike.strike} P @ ${best_strike.premium}")
+        print(f"    Size:    {sized.contracts}x ({sized.portfolio_pct:.1%} of NLV)")
+        print(f"    Yield:   {best_strike.annualized_yield:.0%} annualized")
+        if best_strike.technical_reason:
+            print(f"    Level:   {best_strike.technical_reason}")
+
+        # Submit to Alpaca (paper)
+        order = alpaca.sell_to_open_option(
+            underlying=symbol,
+            expiration=target_exp,
+            option_type="put",
+            strike=best_strike.strike,
+            quantity=sized.contracts,
+            limit_price=best_strike.premium,
+        )
+        print(f"    Order:   {order.order_id} — {order.status}")
+        orders_submitted += 1
+
+    print(f"\n  Orders submitted: {orders_submitted}")
+    print(f"{'=' * 60}")
+
+    # 5. Print account dashboard
+    _print_alpaca_dashboard(alpaca)
+
+
+def _print_alpaca_dashboard(alpaca: Any) -> None:
+    """Print Alpaca account status."""
+    acct = alpaca.get_account()
+    positions = alpaca.get_positions()
+    orders = alpaca.get_order_history(limit=10)
+
+    print(f"\n{'=' * 60}")
+    print(f"  ALPACA PAPER ACCOUNT")
+    print(f"  {'Live API' if alpaca.is_live else 'In-Memory Simulation'}")
+    print(f"{'=' * 60}")
+    print(f"  Equity:       ${acct.equity:,.2f}")
+    print(f"  Cash:         ${acct.cash:,.2f}")
+    print(f"  Buying Power: ${acct.buying_power:,.2f}")
+
+    if positions:
+        print(f"\n  POSITIONS ({len(positions)}):")
+        for p in positions:
+            print(f"    {p.symbol}: {p.quantity}x @ ${p.avg_entry_price} "
+                  f"(P&L: ${p.unrealized_pnl:,.2f})")
+    else:
+        print(f"\n  No open positions.")
+
+    filled = [o for o in orders if o.status == "filled"]
+    if filled:
+        print(f"\n  RECENT FILLS ({len(filled)}):")
+        for o in filled[:5]:
+            print(f"    {o.order_id}: {o.position_intent} {o.symbol} "
+                  f"{o.quantity}x @ ${o.filled_price}")
+
+    print(f"{'=' * 60}")
 
 
 async def mode_backtest() -> None:

@@ -76,10 +76,11 @@ def size_position(
 
     if capital_per_contract > 0:
         contracts = int(total_capital / capital_per_contract)
-        # Allow 1 contract when target allocation can't fill even 1:
-        # cap at 20% of NLV (options minimum lot = 1 contract)
-        if contracts == 0 and capital_per_contract <= float(nlv) * 0.20:
-            contracts = 1
+        # Allow 1-contract override for MEDIUM+ only.
+        # LOW conviction with 0 affordable contracts = skip.
+        if contracts == 0 and conviction != "low":
+            if capital_per_contract <= float(nlv) * 0.20:
+                contracts = 1
     else:
         contracts = 1
 

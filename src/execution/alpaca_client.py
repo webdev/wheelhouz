@@ -85,15 +85,15 @@ def build_option_symbol(
     option_type: str,
     strike: Decimal,
 ) -> str:
-    """Build OCC option symbol: AAPL260515P00200000.
+    """Build OCC option symbol for in-memory sim: AAPL260515P00200000.
 
-    Format: SYMBOL(6) + YYMMDD + C/P + Strike*1000 (8 digits).
+    Format: SYMBOL + YYMMDD + C/P + Strike*1000 (8 digits).
+    No space padding — Alpaca doesn't use padded symbols.
     """
-    sym = underlying.ljust(6)[:6]
     exp = expiration.strftime("%y%m%d")
     cp = "C" if option_type.lower().startswith("c") else "P"
     strike_int = int(strike * 1000)
-    return f"{sym}{exp}{cp}{strike_int:08d}"
+    return f"{underlying}{exp}{cp}{strike_int:08d}"
 
 
 class AlpacaPaperClient:
@@ -183,6 +183,49 @@ class AlpacaPaperClient:
             for p in raw
         ]
 
+    # ── Contract lookup ─────────────────────────────────────────
+
+    def find_nearest_contract(
+        self,
+        underlying: str,
+        target_expiration: date,
+        option_type: str,
+        target_strike: Decimal,
+    ) -> dict[str, Any] | None:
+        """Find the real Alpaca contract nearest to the target strike/expiration.
+
+        Searches within +/- 7 days of target expiration and +/- 10% of strike.
+        Returns the contract dict or None if not found.
+        """
+        if self._fallback:
+            return None
+
+        from datetime import timedelta
+
+        strike_margin = target_strike * Decimal("0.10")
+        contracts = self.get_option_contracts(
+            underlying=underlying,
+            expiration_gte=target_expiration - timedelta(days=7),
+            expiration_lte=target_expiration + timedelta(days=7),
+            strike_gte=target_strike - strike_margin,
+            strike_lte=target_strike + strike_margin,
+            option_type=option_type,
+        )
+
+        if not contracts:
+            return None
+
+        # Pick the contract closest to target strike, then closest expiration
+        def score(c: dict[str, Any]) -> tuple[float, int]:
+            strike_diff = abs(float(c["strike"] - target_strike))
+            exp = c["expiration"]
+            if isinstance(exp, str):
+                exp = date.fromisoformat(exp)
+            exp_diff = abs((exp - target_expiration).days)
+            return (strike_diff, exp_diff)
+
+        return min(contracts, key=score)
+
     # ── Orders ─────────────────────────────────────────────────
 
     def sell_to_open_option(
@@ -194,10 +237,27 @@ class AlpacaPaperClient:
         quantity: int,
         limit_price: Decimal,
     ) -> AlpacaOrder:
-        """Sell to open an option contract (CSP or CC)."""
-        occ_symbol = build_option_symbol(underlying, expiration, option_type, strike)
+        """Sell to open an option contract (CSP or CC).
 
+        When connected to Alpaca, looks up the nearest real contract.
+        In fallback mode, uses synthetic OCC symbol.
+        """
         if not self._fallback:
+            # Find real contract from Alpaca
+            contract = self.find_nearest_contract(
+                underlying, expiration, option_type, strike,
+            )
+            if contract is None:
+                raise ValueError(
+                    f"No {option_type} contract found for {underlying} "
+                    f"near ${strike} exp {expiration}"
+                )
+            occ_symbol = str(contract["symbol"])
+            log.info("contract_matched",
+                     underlying=underlying, target_strike=str(strike),
+                     matched_symbol=occ_symbol,
+                     matched_strike=str(contract["strike"]),
+                     matched_exp=str(contract["expiration"]))
             return self._sdk_submit_option_order(
                 occ_symbol=occ_symbol,
                 side="sell",
@@ -205,6 +265,8 @@ class AlpacaPaperClient:
                 quantity=quantity,
                 limit_price=limit_price,
             )
+
+        occ_symbol = build_option_symbol(underlying, expiration, option_type, strike)
         return self._mem_submit_order(
             symbol=occ_symbol,
             side="sell",
@@ -223,16 +285,24 @@ class AlpacaPaperClient:
         limit_price: Decimal,
     ) -> AlpacaOrder:
         """Buy to close an option position."""
-        occ_symbol = build_option_symbol(underlying, expiration, option_type, strike)
-
         if not self._fallback:
+            contract = self.find_nearest_contract(
+                underlying, expiration, option_type, strike,
+            )
+            if contract is None:
+                raise ValueError(
+                    f"No {option_type} contract found for {underlying} "
+                    f"near ${strike} exp {expiration}"
+                )
             return self._sdk_submit_option_order(
-                occ_symbol=occ_symbol,
+                occ_symbol=str(contract["symbol"]),
                 side="buy",
                 position_intent="buy_to_close",
                 quantity=quantity,
                 limit_price=limit_price,
             )
+
+        occ_symbol = build_option_symbol(underlying, expiration, option_type, strike)
         return self._mem_submit_order(
             symbol=occ_symbol,
             side="buy",

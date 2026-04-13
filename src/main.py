@@ -387,12 +387,16 @@ async def mode_paper() -> None:
 
     log.info("mode_paper_start")
 
-    # 1. Connect to Alpaca
+    # 1. Connect to Alpaca and clean stale state
     alpaca = AlpacaPaperClient()
+    if alpaca.is_live:
+        alpaca.cancel_all_orders()
+        log.info("cancelled_stale_orders")
     acct = alpaca.get_account()
     log.info("alpaca_account",
              mode="LIVE API" if alpaca.is_live else "IN-MEMORY SIM",
-             equity=str(acct.equity), cash=str(acct.cash))
+             equity=str(acct.equity), cash=str(acct.cash),
+             buying_power=str(acct.buying_power))
 
     # 2. Run the full briefing pipeline (data + signals)
     result = await run_analysis_cycle("paper_scan", always_push=True)
@@ -461,6 +465,11 @@ async def mode_paper() -> None:
             portfolio=portfolio,
         )
 
+        if sized.contracts == 0:
+            print(f"\n  {symbol}: can't afford 1 contract at ${best_strike.strike} "
+                  f"({sized.conviction} conviction) — skipping")
+            continue
+
         # Print proposal
         sig_names = ", ".join(s.signal_type.value for s in sigs)
         print(f"\n  {symbol} — {sized.conviction.upper()} conviction")
@@ -472,16 +481,20 @@ async def mode_paper() -> None:
             print(f"    Level:   {best_strike.technical_reason}")
 
         # Submit to Alpaca (paper)
-        order = alpaca.sell_to_open_option(
-            underlying=symbol,
-            expiration=target_exp,
-            option_type="put",
-            strike=best_strike.strike,
-            quantity=sized.contracts,
-            limit_price=best_strike.premium,
-        )
-        print(f"    Order:   {order.order_id} — {order.status}")
-        orders_submitted += 1
+        try:
+            order = alpaca.sell_to_open_option(
+                underlying=symbol,
+                expiration=target_exp,
+                option_type="put",
+                strike=best_strike.strike,
+                quantity=sized.contracts,
+                limit_price=best_strike.premium,
+            )
+            print(f"    Order:   {order.order_id} — {order.status}")
+            orders_submitted += 1
+        except Exception as e:
+            print(f"    Order FAILED: {e}")
+            log.warning("order_failed", symbol=symbol, error=str(e))
 
     print(f"\n  Orders submitted: {orders_submitted}")
     print(f"{'=' * 60}")

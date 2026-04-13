@@ -72,7 +72,11 @@ def size_position(
     total_capital = float(nlv) * target_pct
 
     if capital_per_contract > 0:
-        contracts = max(1, int(total_capital / capital_per_contract))
+        contracts = int(total_capital / capital_per_contract)
+        # Allow 1 contract when target allocation can't fill even 1:
+        # cap at 20% of NLV (options minimum lot = 1 contract)
+        if contracts == 0 and capital_per_contract <= float(nlv) * 0.20:
+            contracts = 1
     else:
         contracts = 1
 

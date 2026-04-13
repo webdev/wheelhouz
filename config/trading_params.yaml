@@ -67,7 +67,7 @@ sizing:
 
   # Signal strength thresholds
   high_conviction_strength: 70
-  high_conviction_min_signals: 2
+  high_conviction_min_signals: 3
   medium_conviction_strength: 50
 
   # Scaling

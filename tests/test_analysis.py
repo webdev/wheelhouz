@@ -212,6 +212,7 @@ class TestSizing:
         high_signals = [
             make_alpha_signal(strength=80),
             make_alpha_signal(strength=75, signal_type=SignalType.IV_RANK_SPIKE),
+            make_alpha_signal(strength=72, signal_type=SignalType.SUPPORT_BOUNCE),
         ]
         low_signals = [make_alpha_signal(strength=30)]
 

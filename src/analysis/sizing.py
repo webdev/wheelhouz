@@ -1,9 +1,10 @@
 """Conviction-based position sizing.
 
-HIGH conviction (signal strength >70, 2+ confirming signals): 3-5% of NLV
-MEDIUM conviction (strength 40-70, or single strong signal):  1.5-3% of NLV
-LOW conviction (strength <40, marginal setup):                0.5-1.5% of NLV
+HIGH conviction: avg strength >= 70, 3+ confirming signals   → 3-5% of NLV
+MEDIUM conviction: avg strength >= 50 AND 2+ signals         → 1.5-3% of NLV
+LOW conviction: everything else (1 signal, weak signals)      → 0.5-1.5% of NLV
 
+A single signal NEVER qualifies above LOW. You need convergence.
 Adjusts for concentration limits and margin utilization.
 """
 
@@ -36,15 +37,17 @@ def size_position(
     )
     num_confirming = len(signals)
 
-    # Conviction classification
+    # Conviction classification — convergence required.
+    # A single signal is ALWAYS low conviction, no matter how strong.
     high_strength = float(sizing.get("high_conviction_strength", 70))
-    high_min_signals = int(sizing.get("high_conviction_min_signals", 2))
+    high_min_signals = int(sizing.get("high_conviction_min_signals", 3))
     med_strength = float(sizing.get("medium_conviction_strength", 50))
 
-    if avg_strength >= high_strength and num_confirming >= high_min_signals:
+    if (avg_strength >= high_strength
+            and num_confirming >= high_min_signals):
         conviction = "high"
         target_pct = float(sizing.get("high_conviction_pct", 0.04))
-    elif avg_strength >= med_strength or num_confirming >= 2:
+    elif avg_strength >= med_strength and num_confirming >= 2:
         conviction = "medium"
         target_pct = float(sizing.get("medium_conviction_pct", 0.02))
     else:

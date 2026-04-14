@@ -271,213 +271,181 @@ def format_local_briefing(
     analyst_brief: str | None = None,
     position_reviews: list[PositionReview] | None = None,
 ) -> str:
-    """Format a rich text briefing from live data — no API key required."""
+    """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
+    from datetime import date, timedelta
+
     today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
+    regime_tag = {"attack": "ATTACK", "hold": "HOLD", "defend": "DEFEND", "crisis": "CRISIS"}
     lines: list[str] = []
 
-    # Header
+    # Header — compact, regime baked in
     lines.append(f"{'=' * 60}")
-    lines.append(f"  WHEEL COPILOT — MORNING BRIEFING")
-    lines.append(f"  {today}")
+    lines.append(f"  WHEEL COPILOT — {today}")
+    lines.append(f"  {regime_tag.get(regime.regime, regime.regime.upper())} "
+                 f"| VIX {vix:.1f} | SPY {spy_change:+.2%}")
     lines.append(f"{'=' * 60}")
 
-    # Regime
-    regime_emoji = {
-        "attack": "[ATTACK]", "hold": "[HOLD]",
-        "defend": "[DEFEND]", "crisis": "[CRISIS]",
-    }
-    lines.append(f"\n━━ REGIME ━━")
-    lines.append(f"  {regime_emoji.get(regime.regime, regime.regime.upper())} "
-                 f"VIX {vix:.1f} | SPY {spy_change:+.2%} | {regime.severity}")
-
-    # Position review (before action plan — manage existing risk first)
+    # ── DO NOW — urgent position actions + high conviction trades ──
+    # Collect urgent items
+    urgent_positions = []
     if position_reviews:
-        lines.append(f"\n━━ POSITION REVIEW ━━")
-        lines.append(format_position_review(position_reviews))
+        urgent_positions = [p for p in position_reviews
+                           if p.action in ("CLOSE NOW", "TAKE PROFIT")]
+    high_trades = []
+    if recommendations:
+        high_trades = [r for r in recommendations if r.conviction == "high"]
 
-    # OPPORTUNITIES — TV-driven scanner for names without quant signals
+    if urgent_positions or high_trades:
+        lines.append(f"\n━━ DO NOW ━━")
+
+        for p in urgent_positions:
+            lines.append(f"  {p.action}: {p.symbol}")
+            lines.append(f"    {p.reasoning}")
+
+        for r in high_trades:
+            exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
+            delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
+            tv_str = ""
+            if intel_contexts:
+                ctx_match = next((c for c in intel_contexts if c.symbol == r.symbol), None)
+                if ctx_match and ctx_match.technical_consensus:
+                    tv_str = f" | TV {ctx_match.technical_consensus.overall}"
+
+            lines.append(f"  >>> {r.symbol} — Sell Cash-Secured Put")
+            lines.append(
+                f"      {r.contracts}x ${r.strike} P exp {exp_str} "
+                f"@ ${r.premium} mid"
+            )
+            lines.append(
+                f"      {r.annualized_yield:.0%} ann. yield{delta_str}{tv_str}"
+            )
+            lines.append(
+                f"      Collateral ${r.capital_deployed:,.0f} "
+                f"({r.portfolio_pct:.1%} NLV) | "
+                f"Max profit ${r.premium * r.contracts * 100:,.0f}"
+            )
+            sig_names = ", ".join(s.signal_type.value for s in r.signals)
+            lines.append(f"      Why: {sig_names}")
+            if r.smart_strike and r.smart_strike.technical_reason:
+                lines.append(f"      Strike at {r.smart_strike.technical_reason}")
+
+    # ── CONSIDER — medium conviction trades + TV opportunities ──
+    medium_trades = []
+    if recommendations:
+        medium_trades = [r for r in recommendations if r.conviction == "medium"]
+
+    # TV-driven opportunities (no quant signals, but strong TV + IV)
+    opportunities: list[tuple[str, float, str, float, float]] = []
     if intel_contexts:
-        # Symbols already in recommendations (have quant signals)
         signal_symbols = {r.symbol for r in recommendations} if recommendations else set()
-
-        # Score symbols: TV bullishness + IV rank + premium potential
-        tv_scores = {
-            "STRONG_BUY": 3, "BUY": 2, "NEUTRAL": 0, "SELL": -1, "STRONG_SELL": -2,
-        }
-        opportunities: list[tuple[str, float, str, float, float]] = []
+        tv_scores = {"STRONG_BUY": 3, "BUY": 2}
         for ctx in intel_contexts:
             if ctx.symbol in signal_symbols:
-                continue  # already in action plan
+                continue
             tc = ctx.technical_consensus
             if not tc or tc.overall not in ("BUY", "STRONG_BUY"):
-                continue  # only surface bullish names
+                continue
             iv = ctx.quant.iv_rank
             if iv < 30:
-                continue  # premium too cheap to sell
-
+                continue
             score = tv_scores.get(tc.overall, 0) + (iv / 30.0)
-            # Find premium yield from options if available
             prem_yield = ctx.options.annualized_yield if ctx.options else 0.0
             opportunities.append((ctx.symbol, score, tc.overall, iv, prem_yield))
-
         opportunities.sort(key=lambda x: -x[1])
+
+    if medium_trades or opportunities:
+        lines.append(f"\n━━ CONSIDER ━━")
+
+        for r in medium_trades:
+            exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
+            delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
+            tv_str = ""
+            if intel_contexts:
+                ctx_match = next((c for c in intel_contexts if c.symbol == r.symbol), None)
+                if ctx_match and ctx_match.technical_consensus:
+                    tv_str = f" | TV {ctx_match.technical_consensus.overall}"
+
+            lines.append(f"   >> {r.symbol} — Sell Cash-Secured Put")
+            lines.append(
+                f"      {r.contracts}x ${r.strike} P exp {exp_str} "
+                f"@ ${r.premium} mid"
+            )
+            lines.append(
+                f"      {r.annualized_yield:.0%} ann. yield{delta_str}{tv_str}"
+            )
+            lines.append(
+                f"      Collateral ${r.capital_deployed:,.0f} "
+                f"({r.portfolio_pct:.1%} NLV) | "
+                f"Max profit ${r.premium * r.contracts * 100:,.0f}"
+            )
+            sig_names = ", ".join(s.signal_type.value for s in r.signals)
+            lines.append(f"      Why: {sig_names}")
+
         if opportunities:
-            lines.append(f"\n━━ OPPORTUNITIES ━━")
-            lines.append("  Strong TradingView consensus + decent IV — worth investigating:")
+            if medium_trades:
+                lines.append("")
+            lines.append("  TV-driven (no quant signals yet — investigate):")
             for sym, _, tv_rating, iv, ann_y in opportunities[:5]:
                 yield_str = f" | {ann_y:.0%} ann." if ann_y > 0 else ""
-                lines.append(
-                    f"  {sym}: TV {tv_rating} | IV rank {iv:.0f}{yield_str}"
-                )
+                lines.append(f"    {sym}: TV {tv_rating} | IV rank {iv:.0f}{yield_str}")
 
-    # ACTION PLAN — the most important section
-    if recommendations is not None:
-        trades = [r for r in recommendations if r.conviction in ("high", "medium")]
-        watch = [r for r in recommendations if r.conviction == "low"]
-
-        lines.append(f"\n━━ ACTION PLAN ━━")
-        if trades:
-            for r in trades:
-                tag = ">>>" if r.conviction == "high" else " >>"
-                sig_names = ", ".join(s.signal_type.value for s in r.signals)
-                exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
-                delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
-                lines.append(
-                    f"  {tag} {r.symbol} — Cash-Secured Put"
-                )
-                lines.append(
-                    f"      Sell {r.contracts}x ${r.strike} put exp {exp_str} "
-                    f"@ ${r.premium} mid"
-                )
-                lines.append(
-                    f"      {r.conviction.upper()} conviction | "
-                    f"{r.annualized_yield:.0%} ann. yield{delta_str}"
-                )
-                lines.append(
-                    f"      Collateral: ${r.capital_deployed:,.0f} "
-                    f"({r.portfolio_pct:.1%} NLV) | "
-                    f"Max profit: ${r.premium * r.contracts * 100:,.0f}"
-                )
-                lines.append(f"      Signals: {sig_names}")
-                if r.smart_strike and r.smart_strike.technical_reason:
-                    lines.append(f"      Strike at {r.smart_strike.technical_reason}")
-                # Show real chain data if available
-                if intel_contexts:
-                    ctx_match = next((c for c in intel_contexts if c.symbol == r.symbol), None)
-                    if ctx_match and ctx_match.options and ctx_match.options.chain_available:
-                        opt = ctx_match.options
-                        lines.append(
-                            f"      Chain: IV rank {opt.iv_rank:.0f} | "
-                            f"bid-ask spread {opt.bid_ask_spread_pct:.1f}%"
-                        )
-                    if ctx_match and ctx_match.technical_consensus:
-                        tc = ctx_match.technical_consensus
-                        lines.append(f"      TradingView: {tc.overall}")
-        else:
-            lines.append("  No actionable trades (need 2+ converging signals).")
-
-        if watch:
-            lines.append(f"\n  WATCH LIST (low conviction — monitor, don't trade):")
-            for r in watch:
-                sig_names = ", ".join(s.signal_type.value for s in r.signals)
-                lines.append(f"    {r.symbol}: {sig_names} (strength "
-                             f"{max(s.strength for s in r.signals):.0f}) — "
-                             f"needs more signals to confirm")
-
-        if not trades and not watch:
-            lines.append("  No signals fired. Sit tight.")
-    else:
-        lines.append(f"\n━━ ACTION PLAN ━━")
-        lines.append("  (sizing pipeline not run)")
-
-    # Analyst brief (Claude-powered reasoning)
-    if analyst_brief:
-        lines.append(f"\n━━ ANALYST BRIEF ━━")
-        lines.append(analyst_brief)
-
-    # TradingView consensus summary
-    if intel_contexts:
-        tv_available = [c for c in intel_contexts if c.technical_consensus]
-        if tv_available:
-            lines.append(f"\n━━ TRADINGVIEW CONSENSUS ━━")
-            for ctx in tv_available:
-                tc = ctx.technical_consensus
-                agreement = ""
-                if ctx.quant.signal_count > 0:
-                    # Signals fired = system recommends selling puts (bullish thesis)
-                    tv_bullish = tc.overall in ("BUY", "STRONG_BUY", "NEUTRAL")
-                    tv_bearish = tc.overall in ("SELL", "STRONG_SELL")
-                    if tv_bullish:
-                        agreement = " [AGREES with signals]"
-                    elif tv_bearish:
-                        agreement = " [DISSENTS from signals]"
-                lines.append(
-                    f"  {ctx.symbol}: {tc.overall} "
-                    f"({tc.buy_count}B/{tc.neutral_count}N/{tc.sell_count}S) "
-                    f"| MA: {tc.moving_averages} | Osc: {tc.oscillators}"
-                    f"{agreement}"
-                )
-
-    # Signal flash
-    lines.append(f"\n━━ SIGNAL FLASH ━━")
-    if all_signals:
-        # Group by symbol
-        by_symbol: dict[str, list[AlphaSignal]] = {}
-        for s in all_signals:
-            by_symbol.setdefault(s.symbol, []).append(s)
-
-        for sym, sigs in sorted(by_symbol.items()):
-            sig_names = ", ".join(s.signal_type.value for s in sigs)
-            top_strength = max(s.strength for s in sigs)
-            lines.append(f"  {sym}: {sig_names} (strength {top_strength:.0f})")
-            for s in sigs:
-                lines.append(f"    -> {s.reasoning}")
-        lines.append(f"\n  Total: {len(all_signals)} signals on "
-                     f"{len(by_symbol)} symbols")
-    else:
-        lines.append("  No signals fired. Markets quiet.")
-
-    # Watchlist snapshot
-    lines.append(f"\n━━ WATCHLIST ━━")
-    lines.append(f"  {'Symbol':<8} {'Price':>10} {'1d':>8} {'5d':>8} "
-                 f"{'vs 52wH':>8} {'RSI':>6} {'IV Rank':>8}")
-    lines.append(f"  {'-' * 58}")
-    for symbol, mkt, hist, _, _ in watchlist_data:
-        rsi_str = f"{hist.rsi_14:.0f}" if hist.rsi_14 is not None else "N/A"
-        iv_str = f"{mkt.iv_rank:.0f}" if mkt.iv_rank > 0 else "N/A"
-        lines.append(
-            f"  {symbol:<8} ${float(mkt.price):>9,.2f} "
-            f"{mkt.price_change_1d:>+7.1f}% {mkt.price_change_5d:>+7.1f}% "
-            f"{mkt.price_vs_52w_high:>+7.1f}% {rsi_str:>6} {iv_str:>8}"
-        )
-
-    # Earnings upcoming
-    from datetime import date, timedelta
+    # ── WATCH — low conviction + earnings + tax + position holds ──
+    watch_trades = []
+    if recommendations:
+        watch_trades = [r for r in recommendations if r.conviction == "low"]
+    watch_positions = []
+    if position_reviews:
+        watch_positions = [p for p in position_reviews
+                          if p.action in ("WATCH CLOSELY", "HOLD")]
     upcoming_earnings = []
     for symbol, _, _, _, cal in watchlist_data:
         if cal.next_earnings and cal.next_earnings <= date.today() + timedelta(days=14):
             days = (cal.next_earnings - date.today()).days
             upcoming_earnings.append((symbol, cal.next_earnings, days))
 
-    if upcoming_earnings:
-        lines.append(f"\n━━ EARNINGS WATCH ━━")
-        for sym, dt, days in sorted(upcoming_earnings, key=lambda x: x[2]):
-            lines.append(f"  {sym}: {dt} ({days}d away)")
+    has_watch = watch_trades or watch_positions or upcoming_earnings or tax_alerts
+    if has_watch:
+        lines.append(f"\n━━ WATCH ━━")
 
-    # Tax alerts
-    if tax_alerts:
-        lines.append(f"\n━━ TAX ALERTS ━━")
+        for p in watch_positions:
+            lines.append(f"  {p.action}: {p.symbol} — {p.reasoning}")
+
+        for r in watch_trades:
+            sig_names = ", ".join(s.signal_type.value for s in r.signals)
+            lines.append(f"  {r.symbol}: {sig_names} — needs more signals")
+
+        if upcoming_earnings:
+            lines.append("")
+            for sym, dt, days in sorted(upcoming_earnings, key=lambda x: x[2]):
+                label = "TOMORROW" if days <= 1 else f"{days}d"
+                lines.append(f"  Earnings: {sym} {dt} ({label})")
+
         for alert in tax_alerts:
-            lines.append(f"  {alert}")
+            lines.append(f"  Tax: {alert}")
 
-    # Macro
-    lines.append(f"\n━━ MACRO ━━")
-    # VIX term structure from any symbol's context
-    if watchlist_data:
-        sample_mkt = watchlist_data[0][1]
-        if sample_mkt.vix_term_structure:
-            lines.append(f"  VIX term structure: {sample_mkt.vix_term_structure}")
-    lines.append(f"  VIX: {vix:.2f}")
+    # ── Nothing to do ──
+    if not (urgent_positions or high_trades or medium_trades or
+            opportunities or watch_trades):
+        lines.append(f"\n  No signals fired. Sit tight.")
+
+    # ── ANALYST BRIEF — Claude reasoning (when available) ──
+    if analyst_brief:
+        lines.append(f"\n━━ ANALYST BRIEF ━━")
+        lines.append(analyst_brief)
+
+    # ── MARKET — compact reference table ──
+    lines.append(f"\n━━ MARKET ━━")
+    lines.append(f"  {'Symbol':<6} {'Price':>9} {'1d':>7} {'5d':>7} "
+                 f"{'52wH':>7} {'RSI':>4} {'IV':>4}")
+    lines.append(f"  {'-' * 50}")
+    for symbol, mkt, hist, _, _ in watchlist_data:
+        rsi_str = f"{hist.rsi_14:.0f}" if hist.rsi_14 is not None else "--"
+        iv_str = f"{mkt.iv_rank:.0f}" if mkt.iv_rank > 0 else "--"
+        lines.append(
+            f"  {symbol:<6} ${float(mkt.price):>8,.2f} "
+            f"{mkt.price_change_1d:>+6.1f}% {mkt.price_change_5d:>+6.1f}% "
+            f"{mkt.price_vs_52w_high:>+6.1f}% {rsi_str:>4} {iv_str:>4}"
+        )
 
     lines.append(f"\n{'=' * 60}")
     return "\n".join(lines)

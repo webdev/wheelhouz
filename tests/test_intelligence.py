@@ -412,9 +412,7 @@ class TestBriefingWiring:
             analyst_brief="Test analyst brief content",
         )
 
-        assert "TRADINGVIEW CONSENSUS" in briefing
         assert "NVDA" in briefing
-        assert "BUY" in briefing
         assert "ANALYST BRIEF" in briefing
         assert "Test analyst brief content" in briefing
 
@@ -648,7 +646,7 @@ class TestPositionReviewBriefing:
             position_reviews=reviews,
         )
 
-        assert "POSITION REVIEW" in briefing
+        assert "DO NOW" in briefing
         assert "PLTR" in briefing
         assert "CLOSE NOW" in briefing
         assert "HOLD" in briefing

@@ -488,6 +488,7 @@ class TestPortfolioLoading:
         mock_client.get_account.return_value = mock_account
         from pathlib import Path
         with patch("src.data.portfolio.PORTFOLIO_YAML", Path("/nonexistent/portfolio.yaml")), \
+             patch("src.data.auth.get_session", side_effect=Exception("no etrade")), \
              patch("src.data.portfolio.AlpacaPaperClient", return_value=mock_client):
             state = load_portfolio_state()
 
@@ -511,6 +512,7 @@ class TestPortfolioLoading:
         mock_client.get_account.return_value = mock_account
         from pathlib import Path
         with patch("src.data.portfolio.PORTFOLIO_YAML", Path("/nonexistent/portfolio.yaml")), \
+             patch("src.data.auth.get_session", side_effect=Exception("no etrade")), \
              patch("src.data.portfolio.AlpacaPaperClient", return_value=mock_client):
             state = load_portfolio_state()
 

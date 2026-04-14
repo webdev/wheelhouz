@@ -81,7 +81,7 @@ def fetch_portfolio(session: ETradeSession) -> PortfolioState:
         # Get account balance for NLV / buying power
         try:
             balance = session.accounts.get_account_balance(
-                account_id, real_time_nav=True
+                account_id, real_time=True, resp_format="json"
             )
             bal_data = balance.get("BalanceResponse", {}).get("Computed", {})
             total_nlv += _decimal(bal_data.get("RealTimeValues", {}).get("totalAccountValue", 0))

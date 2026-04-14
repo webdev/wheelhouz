@@ -127,11 +127,32 @@ def load_portfolio_from_yaml(path: Path | None = None) -> PortfolioState:
 
 
 def load_portfolio_state() -> PortfolioState:
-    """Load current portfolio — YAML snapshot first, then Alpaca fallback."""
-    # Prefer YAML snapshot (real positions) over Alpaca (paper)
+    """Load current portfolio — E*Trade live first, then YAML, then Alpaca fallback."""
+    # 1. Try live E*Trade API
+    try:
+        from src.data.auth import get_session
+        from src.data.broker import fetch_portfolio
+        session = get_session()
+        state = fetch_portfolio(session)
+        if state.positions:
+            # Build concentration from live data
+            nlv = float(state.net_liquidation) if state.net_liquidation > 0 else 1.0
+            for pos in state.positions:
+                value = float(pos.market_value) if pos.market_value else 0.0
+                state.concentration[pos.symbol] = (
+                    state.concentration.get(pos.symbol, 0.0) + abs(value) / nlv
+                )
+            logger.info("portfolio_loaded_etrade", positions=len(state.positions),
+                        nlv=str(state.net_liquidation))
+            return state
+    except Exception as e:
+        logger.info("etrade_unavailable_falling_back", error=str(e))
+
+    # 2. Fall back to YAML snapshot
     if PORTFOLIO_YAML.exists():
         return load_portfolio_from_yaml()
 
+    # 3. Fall back to Alpaca paper trading
     try:
         client = AlpacaPaperClient()
         account = client.get_account()
@@ -141,7 +162,6 @@ def load_portfolio_state() -> PortfolioState:
 
     positions = [alpaca_position_to_position(p) for p in account.positions]
 
-    # Build concentration map: exposure per underlying as % of NLV
     nlv = float(account.equity) if account.equity > 0 else 1.0
     concentration: dict[str, float] = {}
     for pos in positions:

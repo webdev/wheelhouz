@@ -39,11 +39,13 @@ class PositionReview:
 def _make_review(position: Position, action: str, reasoning: str, pnl: Decimal, pnl_pct: float) -> PositionReview:
     """Build a PositionReview with full position details."""
     exp_str = position.expiration.strftime("%b %d") if position.expiration else ""
+    # Options are 100 shares per contract
+    multiplier = 100 if position.option_type else 1
     return PositionReview(
         symbol=position.symbol,
         action=action,
         reasoning=reasoning,
-        current_pnl=pnl * 100 * position.quantity,
+        current_pnl=pnl * multiplier * position.quantity,
         days_to_expiry=position.days_to_expiry,
         option_type=position.option_type,
         strike=position.strike,
@@ -65,17 +67,28 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
     3. WATCH CLOSELY — something changed (TV flipped, trend weakening, earnings upcoming)
     4. HOLD — thesis intact, everything healthy
     """
-    pnl = position.entry_price - position.current_price  # positive = profit for short
+    is_short = position.position_type.startswith("short_")
+
+    # P&L: for short options, profit = entry - current (price dropping is good)
+    # For long options, profit = current - entry
+    if is_short:
+        pnl = position.entry_price - position.current_price
+    else:
+        pnl = position.current_price - position.entry_price
     pnl_pct = float(pnl / position.entry_price) if position.entry_price > 0 else 0.0
-    loss_multiple = float(position.current_price / position.entry_price) if position.entry_price > 0 else 0.0
 
     # 1. CLOSE NOW checks
-    # Loss stop: 2x premium for monthlies, 1.5x for weeklies (DTE <= 10)
-    stop_threshold = 1.5 if position.days_to_expiry <= 10 else 2.0
-    if loss_multiple >= stop_threshold:
-        reason = (f"Loss stop hit: current ${position.current_price} is "
-                  f"{loss_multiple:.1f}x entry ${position.entry_price}")
-        return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
+    # Loss stop (short options only): close if option price rises to 2x (monthlies)
+    # or 1.5x (weeklies) what you sold it for
+    if is_short and position.entry_price > 0:
+        loss_multiple = float(position.current_price / position.entry_price)
+        stop_threshold = 1.5 if position.days_to_expiry <= 10 else 2.0
+        if loss_multiple >= stop_threshold:
+            loss_dollars = (position.current_price - position.entry_price) * 100 * position.quantity
+            reason = (f"Loss stop hit: now ${position.current_price} vs "
+                      f"${position.entry_price} entry ({loss_multiple:.1f}x) — "
+                      f"buy back for ${loss_dollars:,.0f} loss")
+            return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
 
     # Earnings conflict — only CLOSE NOW for short-dated positions (DTE <= 30)
     # where earnings is truly imminent. Long-dated options were sold knowing
@@ -84,9 +97,10 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
         reason = "Earnings imminent — close before report"
         return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
 
-    # 2. TAKE PROFIT — captured >75% of premium
-    if pnl_pct >= 0.75:
-        reason = f"Captured {pnl_pct:.0%} of premium (${pnl * 100 * position.quantity:,.0f} profit)"
+    # 2. TAKE PROFIT — captured >75% of premium (short options only)
+    if is_short and pnl_pct >= 0.75:
+        profit_dollars = pnl * 100 * position.quantity
+        reason = f"Captured {pnl_pct:.0%} of premium (${profit_dollars:,.0f} profit) — buy back for ${position.current_price}"
         return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct)
 
     # 3. WATCH CLOSELY checks

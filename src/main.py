@@ -568,6 +568,9 @@ async def run_analysis_cycle(
         portfolio_state = load_portfolio_state()
         if portfolio_state.positions:
             for pos in portfolio_state.positions:
+                # Only review option positions — stocks need different logic
+                if not pos.option_type:
+                    continue
                 # Find matching intelligence context
                 matching_ctx = next(
                     (c for c in intel_contexts if c.symbol == pos.symbol), None

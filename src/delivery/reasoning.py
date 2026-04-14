@@ -102,34 +102,80 @@ def build_reasoning_prompt(contexts: list[IntelligenceContext]) -> str:
     return "\n\n".join(sections)
 
 
-async def generate_analyst_brief(
-    contexts: list[IntelligenceContext],
-    regime_summary: str = "",
-) -> str | None:
-    """Call Claude API to generate reasoned analyst brief.
+def _build_client() -> tuple[object, str] | None:
+    """Build the appropriate Anthropic client based on available credentials.
 
-    Returns None if API key is missing or call fails.
+    Checks in order:
+    1. AWS_BEARER_TOKEN_BEDROCK → AnthropicBedrock (bearer token auth)
+    2. AWS credentials (profile/keys) → AnthropicBedrock (standard AWS auth)
+    3. ANTHROPIC_API_KEY → AsyncAnthropic (direct API)
+
+    Returns (client, model_id) or None if no credentials found.
     """
+    import os
+
     try:
         import anthropic
     except ImportError:
         logger.info("anthropic_not_installed")
         return None
 
-    import os
+    # Option 1: AWS Bedrock with bearer token
+    bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+    if bearer_token:
+        region = os.environ.get("AWS_REGION", "us-west-2")
+        client = anthropic.AsyncAnthropicBedrock(
+            aws_region=region,
+            aws_session_token=bearer_token,
+            aws_access_key="",
+            aws_secret_key="",
+        )
+        model = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6-v1")
+        logger.info("using_bedrock", region=region, model=model)
+        return client, model
+
+    # Option 2: Standard AWS credentials for Bedrock
+    if os.environ.get("AWS_PROFILE") or os.environ.get("AWS_ACCESS_KEY_ID"):
+        region = os.environ.get("AWS_REGION", "us-west-2")
+        client = anthropic.AsyncAnthropicBedrock(aws_region=region)
+        model = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6-v1")
+        logger.info("using_bedrock", region=region, model=model)
+        return client, model
+
+    # Option 3: Direct Anthropic API
     api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.info("no_anthropic_api_key")
+    if api_key:
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+        model = "claude-sonnet-4-20250514"
+        logger.info("using_anthropic_api")
+        return client, model
+
+    logger.info("no_claude_credentials")
+    return None
+
+
+async def generate_analyst_brief(
+    contexts: list[IntelligenceContext],
+    regime_summary: str = "",
+) -> str | None:
+    """Call Claude API to generate reasoned analyst brief.
+
+    Supports AWS Bedrock (bearer token or standard auth) and direct Anthropic API.
+    Returns None if no credentials are available or the call fails.
+    """
+    result = _build_client()
+    if result is None:
         return None
+
+    client, model = result
 
     user_prompt = build_reasoning_prompt(contexts)
     if regime_summary:
         user_prompt = f"REGIME: {regime_summary}\n\n{user_prompt}"
 
     try:
-        client = anthropic.AsyncAnthropic(api_key=api_key)
         response = await client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=model,
             max_tokens=4000,
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],

@@ -209,7 +209,7 @@ def build_recommendations(
         if tv_overall:
             sized = _apply_tv_adjustment(sized, tv_overall)
 
-        if sized.conviction != "skip":
+        if sized.conviction != "skip" and sized.contracts > 0:
             recommendations.append(sized)
 
     # Sort: high > medium > low, then by annualized yield descending
@@ -290,6 +290,41 @@ def format_local_briefing(
         lines.append(f"\n━━ POSITION REVIEW ━━")
         lines.append(format_position_review(position_reviews))
 
+    # OPPORTUNITIES — TV-driven scanner for names without quant signals
+    if intel_contexts:
+        # Symbols already in recommendations (have quant signals)
+        signal_symbols = {r.symbol for r in recommendations} if recommendations else set()
+
+        # Score symbols: TV bullishness + IV rank + premium potential
+        tv_scores = {
+            "STRONG_BUY": 3, "BUY": 2, "NEUTRAL": 0, "SELL": -1, "STRONG_SELL": -2,
+        }
+        opportunities: list[tuple[str, float, str, float, float]] = []
+        for ctx in intel_contexts:
+            if ctx.symbol in signal_symbols:
+                continue  # already in action plan
+            tc = ctx.technical_consensus
+            if not tc or tc.overall not in ("BUY", "STRONG_BUY"):
+                continue  # only surface bullish names
+            iv = ctx.quant.iv_rank
+            if iv < 30:
+                continue  # premium too cheap to sell
+
+            score = tv_scores.get(tc.overall, 0) + (iv / 30.0)
+            # Find premium yield from options if available
+            prem_yield = ctx.options.annualized_yield if ctx.options else 0.0
+            opportunities.append((ctx.symbol, score, tc.overall, iv, prem_yield))
+
+        opportunities.sort(key=lambda x: -x[1])
+        if opportunities:
+            lines.append(f"\n━━ OPPORTUNITIES ━━")
+            lines.append("  Strong TradingView consensus + decent IV — worth investigating:")
+            for sym, _, tv_rating, iv, ann_y in opportunities[:5]:
+                yield_str = f" | {ann_y:.0%} ann." if ann_y > 0 else ""
+                lines.append(
+                    f"  {sym}: TV {tv_rating} | IV rank {iv:.0f}{yield_str}"
+                )
+
     # ACTION PLAN — the most important section
     if recommendations is not None:
         trades = [r for r in recommendations if r.conviction in ("high", "medium")]
@@ -301,14 +336,17 @@ def format_local_briefing(
                 tag = ">>>" if r.conviction == "high" else " >>"
                 sig_names = ", ".join(s.signal_type.value for s in r.signals)
                 exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
+                delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
                 lines.append(
-                    f"  {tag} {r.symbol} — SELL {r.contracts}x "
-                    f"${r.strike}P {exp_str} @ ${r.premium} mid"
+                    f"  {tag} {r.symbol} — Cash-Secured Put"
+                )
+                lines.append(
+                    f"      Sell {r.contracts}x ${r.strike} put exp {exp_str} "
+                    f"@ ${r.premium} mid"
                 )
                 lines.append(
                     f"      {r.conviction.upper()} conviction | "
-                    f"{r.annualized_yield:.0%} ann. yield | "
-                    f"delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
+                    f"{r.annualized_yield:.0%} ann. yield{delta_str}"
                 )
                 lines.append(
                     f"      Collateral: ${r.capital_deployed:,.0f} "
@@ -327,6 +365,9 @@ def format_local_briefing(
                             f"      Chain: IV rank {opt.iv_rank:.0f} | "
                             f"bid-ask spread {opt.bid_ask_spread_pct:.1f}%"
                         )
+                    if ctx_match and ctx_match.technical_consensus:
+                        tc = ctx_match.technical_consensus
+                        lines.append(f"      TradingView: {tc.overall}")
         else:
             lines.append("  No actionable trades (need 2+ converging signals).")
 

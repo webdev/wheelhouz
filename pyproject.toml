@@ -10,6 +10,7 @@ dependencies = [
     "yfinance>=0.2",
     "alpaca-py>=0.20",
     "python-telegram-bot>=21.0",
+    "tradingview-ta>=3.3.0",
 ]
 
 [project.optional-dependencies]

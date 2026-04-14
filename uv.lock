@@ -1277,6 +1277,18 @@ wheels = [
 ]
 
 [[package]]
+name = "tradingview-ta"
+version = "3.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a8/e1/5066e9e1ff3be56615fd5347501aaae92918947d30f76a36a7f707acfe0a/tradingview_ta-3.3.0.tar.gz", hash = "sha256:f1a55351ed28554234106a28772f167e818d57f384d47f85b763bd143955c34a", size = 10898, upload-time = "2022-10-05T12:29:21.748Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/58/db316237a924d0fb9f38a53b8573d6555ada13325caf6a3bb35f77e646fb/tradingview_ta-3.3.0-py3-none-any.whl", hash = "sha256:1250068a44e253caeb2066bc1cd6e588f71796612d41d5d55d25083cf86b5531", size = 10394, upload-time = "2022-10-05T12:29:18.859Z" },
+]
+
+[[package]]
 name = "typing-extensions"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1385,6 +1397,7 @@ dependencies = [
     { name = "python-telegram-bot" },
     { name = "pyyaml" },
     { name = "structlog" },
+    { name = "tradingview-ta" },
     { name = "yfinance" },
 ]
 
@@ -1406,6 +1419,7 @@ requires-dist = [
     { name = "python-telegram-bot", specifier = ">=21.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "structlog", specifier = ">=24.0" },
+    { name = "tradingview-ta", specifier = ">=3.3.0" },
     { name = "yfinance", specifier = ">=0.2" },
 ]
 provides-extras = ["dev"]

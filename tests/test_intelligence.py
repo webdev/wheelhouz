@@ -223,3 +223,59 @@ class TestOptionsChain:
         assert result.puts == []
         assert result.calls == []
         assert result.symbol == "FAKE"
+
+
+from src.data.tradingview import fetch_tradingview_consensus
+
+
+class TestTradingView:
+    def test_fetch_returns_technical_consensus(self) -> None:
+        """Should return a TechnicalConsensus with valid fields."""
+        from unittest.mock import patch, MagicMock
+
+        mock_handler = MagicMock()
+        mock_handler.get_analysis.return_value = MagicMock(
+            summary={"RECOMMENDATION": "BUY", "BUY": 12, "NEUTRAL": 6, "SELL": 8},
+            oscillators={"RECOMMENDATION": "NEUTRAL", "BUY": 3, "NEUTRAL": 5, "SELL": 3},
+            moving_averages={"RECOMMENDATION": "BUY", "BUY": 9, "NEUTRAL": 1, "SELL": 2},
+            indicators={},
+        )
+
+        with patch("src.data.tradingview.TA_Handler", return_value=mock_handler):
+            result = fetch_tradingview_consensus("NVDA")
+
+        assert result is not None
+        assert result.overall == "BUY"
+        assert result.buy_count == 12
+        assert result.source == "tradingview"
+
+    def test_fetch_returns_none_on_failure(self) -> None:
+        """Should return None gracefully on HTTP error."""
+        from unittest.mock import patch
+
+        with patch("src.data.tradingview.TA_Handler", side_effect=Exception("HTTP 429")):
+            result = fetch_tradingview_consensus("FAKE")
+
+        assert result is None
+
+    def test_cache_returns_same_result(self) -> None:
+        """Should cache results for 1 hour."""
+        from unittest.mock import patch, MagicMock
+
+        mock_handler = MagicMock()
+        mock_handler.get_analysis.return_value = MagicMock(
+            summary={"RECOMMENDATION": "SELL", "BUY": 4, "NEUTRAL": 5, "SELL": 17},
+            oscillators={"RECOMMENDATION": "SELL", "BUY": 1, "NEUTRAL": 2, "SELL": 8},
+            moving_averages={"RECOMMENDATION": "SELL", "BUY": 3, "NEUTRAL": 3, "SELL": 9},
+            indicators={},
+        )
+
+        with patch("src.data.tradingview.TA_Handler", return_value=mock_handler) as mock_cls:
+            from src.data.tradingview import _tv_cache
+            _tv_cache.pop("CACHE_TEST_SYM", None)  # ensure clean state for this symbol
+            result1 = fetch_tradingview_consensus("CACHE_TEST_SYM")
+            result2 = fetch_tradingview_consensus("CACHE_TEST_SYM")
+
+        assert result1 is not None
+        assert result1.overall == result2.overall
+        assert mock_cls.call_count == 1

@@ -19,6 +19,14 @@ logger = structlog.get_logger()
 _tv_cache: dict[str, tuple[float, TechnicalConsensus]] = {}
 _CACHE_TTL = 3600  # 1 hour
 
+# Symbols listed on NYSE rather than NASDAQ
+_NYSE_SYMBOLS = {"PLTR", "CRM", "UBER", "TSM", "JPM", "WFC", "BAC", "GS", "V", "MA"}
+
+
+def _get_exchange(symbol: str) -> str:
+    """Return the exchange for a given symbol."""
+    return "NYSE" if symbol in _NYSE_SYMBOLS else "NASDAQ"
+
 
 def fetch_tradingview_consensus(symbol: str) -> TechnicalConsensus | None:
     """Fetch TradingView technical analysis for a US stock.
@@ -36,7 +44,7 @@ def fetch_tradingview_consensus(symbol: str) -> TechnicalConsensus | None:
         handler = TA_Handler(
             symbol=symbol,
             screener="america",
-            exchange="NASDAQ",
+            exchange=_get_exchange(symbol),
             interval=Interval.INTERVAL_1_DAY,
         )
         analysis = handler.get_analysis()

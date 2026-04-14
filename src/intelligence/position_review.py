@@ -43,8 +43,9 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
     reasons: list[str] = []
 
     # 1. CLOSE NOW checks
-    # Loss stop: current price > 2x entry price (for monthlies)
-    if loss_multiple >= 2.0:
+    # Loss stop: 2x premium for monthlies, 1.5x for weeklies (DTE <= 10)
+    stop_threshold = 1.5 if position.days_to_expiry <= 10 else 2.0
+    if loss_multiple >= stop_threshold:
         reasons.append(f"Loss stop hit: current ${position.current_price} is "
                        f"{loss_multiple:.1f}x entry ${position.entry_price}")
         return PositionReview(

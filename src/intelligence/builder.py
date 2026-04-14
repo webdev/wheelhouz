@@ -2,6 +2,7 @@
 """Assemble IntelligenceContext from all available sources."""
 from __future__ import annotations
 
+from datetime import date, timedelta
 from decimal import Decimal
 
 from src.models.intelligence import (
@@ -12,7 +13,7 @@ from src.models.intelligence import (
     TechnicalConsensus,
 )
 from src.models.analysis import SmartStrike
-from src.models.market import EventCalendar, MarketContext, OptionsChain, PriceHistory
+from src.models.market import EventCalendar, MarketContext, OptionContract, OptionsChain, PriceHistory
 from src.models.position import PortfolioState, Position
 from src.models.signals import AlphaSignal
 
@@ -57,7 +58,8 @@ def build_intelligence_context(
             )
             capital = float(best.strike) * 100
             yield_on_cap = float(best.mid) * 100 / capital if capital > 0 else 0.0
-            ann_yield = yield_on_cap * (365.0 / 30.0)
+            actual_dte = (best.expiration - date.today()).days if best.expiration else 30
+            ann_yield = yield_on_cap * (365.0 / max(actual_dte, 1))
 
             options = OptionsIntelligence(
                 best_strike=SmartStrike(
@@ -88,8 +90,11 @@ def build_intelligence_context(
         existing_exposure_pct=exposure_pct,
         existing_positions=existing_positions,
         account_recommendation="",
-        wash_sale_blocked=False,
-        earnings_conflict=False,
+        wash_sale_blocked=False,  # TODO: wire from wash sale tracker
+        earnings_conflict=(
+            calendar.next_earnings is not None
+            and calendar.next_earnings <= date.today() + timedelta(days=45)
+        ),
         available_capital=available_capital,
     )
 
@@ -138,7 +143,7 @@ def _calculate_support_distances(hist: PriceHistory) -> dict[str, float]:
     return distances
 
 
-def _find_best_put(chain: OptionsChain, hist: PriceHistory) -> object | None:
+def _find_best_put(chain: OptionsChain, hist: PriceHistory) -> OptionContract | None:
     """Find the best OTM put from the chain (nearest to 0.25-0.30 delta range)."""
     if not chain.puts:
         return None

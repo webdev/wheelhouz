@@ -385,7 +385,7 @@ def format_local_briefing(
             if medium_trades:
                 lines.append("")
             lines.append("  TV-driven (no quant signals yet — investigate):")
-            for sym, _, tv_rating, iv, ann_y in opportunities[:5]:
+            for sym, _, tv_rating, iv, ann_y in opportunities:
                 yield_str = f" | {ann_y:.0%} ann." if ann_y > 0 else ""
                 lines.append(f"    {sym}: TV {tv_rating} | IV rank {iv:.0f}{yield_str}")
 

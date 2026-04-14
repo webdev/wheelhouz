@@ -344,3 +344,38 @@ class TestIntelligenceBuilder:
             calendar=make_event_calendar(),
         )
         assert ctx.quant.trend_direction == "downtrend"
+
+
+from src.delivery.reasoning import build_reasoning_prompt
+
+
+class TestClaudeReasoning:
+    def test_build_prompt_includes_all_sections(self) -> None:
+        from tests.fixtures.intelligence import (
+            make_intelligence_context,
+            make_quant_intelligence,
+            make_technical_consensus,
+        )
+        ctx = make_intelligence_context(
+            quant=make_quant_intelligence(signal_count=2, avg_strength=65, rsi=28.0),
+            technical_consensus=make_technical_consensus(overall="SELL"),
+        )
+        prompt = build_reasoning_prompt([ctx])
+        assert "NVDA" in prompt
+        assert "QUANT SIGNALS" in prompt
+        assert "TRADINGVIEW" in prompt
+        assert "SELL" in prompt
+
+    def test_build_prompt_handles_missing_tradingview(self) -> None:
+        from tests.fixtures.intelligence import make_intelligence_context
+        ctx = make_intelligence_context(technical_consensus=None)
+        prompt = build_reasoning_prompt([ctx])
+        assert "TradingView: unavailable" in prompt
+
+    def test_build_prompt_caps_at_5_symbols(self) -> None:
+        from tests.fixtures.intelligence import make_intelligence_context
+        contexts = [make_intelligence_context(symbol=f"SYM{i}") for i in range(8)]
+        prompt = build_reasoning_prompt(contexts)
+        assert "SYM0" in prompt
+        assert "SYM4" in prompt
+        assert "SYM5" not in prompt

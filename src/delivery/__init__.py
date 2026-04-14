@@ -19,6 +19,7 @@ from src.delivery.telegram_bot import (
     send_briefing,
     split_message,
 )
+from src.delivery.reasoning import build_reasoning_prompt, generate_analyst_brief
 
 __all__ = [
     "generate_briefing",
@@ -35,4 +36,6 @@ __all__ = [
     "format_gated_alert",
     "send_briefing",
     "split_message",
+    "build_reasoning_prompt",
+    "generate_analyst_brief",
 ]

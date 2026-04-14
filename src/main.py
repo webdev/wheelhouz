@@ -433,42 +433,56 @@ def format_local_briefing(
         lines.append(f"\n━━ ANALYST BRIEF ━━")
         lines.append(analyst_brief)
 
-    # ── NOTABLE — only flag outliers worth knowing about ──
-    notables: list[str] = []
+    # ── SKIP — names the system looked at and explicitly rejected ──
+    # Collect symbols already covered in DO NOW / CONSIDER / WATCH
+    covered: set[str] = set()
+    if recommendations:
+        covered.update(r.symbol for r in recommendations)
+    if position_reviews:
+        covered.update(p.symbol for p in position_reviews)
+    if intel_contexts:
+        signal_syms = {r.symbol for r in recommendations} if recommendations else set()
+        for ctx in intel_contexts:
+            if ctx.symbol in signal_syms:
+                continue
+            tc = ctx.technical_consensus
+            if tc and tc.overall in ("BUY", "STRONG_BUY") and ctx.quant.iv_rank >= 30:
+                covered.add(ctx.symbol)  # already in CONSIDER opportunities
+
+    # Build skip reasons for uncovered symbols
+    tv_by_symbol: dict[str, str] = {}
+    if intel_contexts:
+        for ctx in intel_contexts:
+            if ctx.technical_consensus:
+                tv_by_symbol[ctx.symbol] = ctx.technical_consensus.overall
+
+    skips: list[str] = []
     for symbol, mkt, hist, _, _ in watchlist_data:
-        flags: list[str] = []
-        rsi = hist.rsi_14
+        if symbol in covered:
+            continue
         iv = mkt.iv_rank
+        rsi = hist.rsi_14
+        tv = tv_by_symbol.get(symbol, "")
 
-        # Oversold / overbought
-        if rsi is not None and rsi < 30:
-            flags.append(f"RSI {rsi:.0f} (oversold)")
-        elif rsi is not None and rsi > 75:
-            flags.append(f"RSI {rsi:.0f} (overbought)")
-
-        # Premium-rich or premium-dead
-        if iv >= 80:
-            flags.append(f"IV rank {iv:.0f} (rich premium)")
+        # Determine skip reason (most important reason first)
+        if tv in ("SELL", "STRONG_SELL"):
+            if iv >= 60:
+                skips.append(f"  {symbol}: TV {tv} — rich premium (IV {iv:.0f}) "
+                             f"but crowd is bearish. Wait for turn.")
+            else:
+                skips.append(f"  {symbol}: TV {tv} — bearish consensus. Stay away.")
         elif iv > 0 and iv < 20:
-            flags.append(f"IV rank {iv:.0f} (cheap — don't sell)")
+            skips.append(f"  {symbol}: IV rank {iv:.0f} — no premium to sell.")
+        elif rsi is not None and rsi > 75:
+            skips.append(f"  {symbol}: RSI {rsi:.0f} — overbought, "
+                         f"not the time to sell puts.")
+        else:
+            skips.append(f"  {symbol}: No signal convergence. Sit tight.")
 
-        # Big movers
-        if mkt.price_change_5d <= -10:
-            flags.append(f"5d {mkt.price_change_5d:+.1f}%")
-        elif mkt.price_change_5d >= 10:
-            flags.append(f"5d {mkt.price_change_5d:+.1f}%")
-
-        # Deep drawdown from highs
-        if mkt.price_vs_52w_high <= -35:
-            flags.append(f"{mkt.price_vs_52w_high:+.0f}% from 52w high")
-
-        if flags:
-            notables.append(f"  {symbol}: {' | '.join(flags)}")
-
-    if notables:
-        lines.append(f"\n━━ NOTABLE ━━")
-        for n in notables:
-            lines.append(n)
+    if skips:
+        lines.append(f"\n━━ SKIP ━━")
+        for s in skips:
+            lines.append(s)
 
     lines.append(f"\n{'=' * 60}")
     return "\n".join(lines)

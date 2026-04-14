@@ -120,22 +120,15 @@ def _build_client() -> tuple[object, str] | None:
         logger.info("anthropic_not_installed")
         return None
 
-    # Option 1: AWS Bedrock with bearer token
+    # Option 1: AWS Bedrock (bearer token via AWS_BEARER_TOKEN_BEDROCK, or standard AWS creds)
+    # The SDK reads AWS_BEARER_TOKEN_BEDROCK from env automatically as api_key
     bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-    if bearer_token:
-        region = os.environ.get("AWS_REGION", "us-west-2")
-        client = anthropic.AsyncAnthropicBedrock(
-            aws_region=region,
-            aws_session_token=bearer_token,
-            aws_access_key="",
-            aws_secret_key="",
-        )
-        model = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6-v1")
-        logger.info("using_bedrock", region=region, model=model)
-        return client, model
-
-    # Option 2: Standard AWS credentials for Bedrock
-    if os.environ.get("AWS_PROFILE") or os.environ.get("AWS_ACCESS_KEY_ID"):
+    has_aws_creds = (
+        bearer_token
+        or os.environ.get("AWS_PROFILE")
+        or os.environ.get("AWS_ACCESS_KEY_ID")
+    )
+    if has_aws_creds:
         region = os.environ.get("AWS_REGION", "us-west-2")
         client = anthropic.AsyncAnthropicBedrock(aws_region=region)
         model = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6-v1")

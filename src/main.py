@@ -20,14 +20,22 @@ from typing import Any
 import structlog
 
 from src.analysis.signals import detect_all_signals
+from src.analysis.sizing import size_position
+from src.analysis.strikes import find_smart_strikes
 from src.config.loader import load_watchlist
 from src.data.events import fetch_event_calendar
 from src.data.market import fetch_market_context, fetch_price_history
+from src.models.analysis import SizedOpportunity
 from src.models.market import EventCalendar, MarketContext, OptionsChain, PriceHistory
+from src.models.position import PortfolioState
 from src.models.signals import AlphaSignal
 from src.monitor.regime import RegimeState, classify_regime
 from src.risk import check_liquidity_health, generate_tax_alerts
 from src.models.account import AccountRouter
+from src.data.tradingview import fetch_tradingview_consensus
+from src.intelligence.builder import build_intelligence_context
+from src.delivery.reasoning import generate_analyst_brief
+from src.models.intelligence import IntelligenceContext
 
 log = structlog.get_logger()
 
@@ -137,6 +145,60 @@ def fetch_all_watchlist_data(
 
 
 # ---------------------------------------------------------------------------
+# Recommendation engine — turns signals into sized trade proposals
+# ---------------------------------------------------------------------------
+
+def build_recommendations(
+    all_signals: list[AlphaSignal],
+    watchlist_data: list[tuple[str, MarketContext, PriceHistory, OptionsChain, EventCalendar]],
+    portfolio: PortfolioState | None = None,
+) -> list[SizedOpportunity]:
+    """Run strikes + sizing on every symbol with fired signals.
+
+    Returns a list of SizedOpportunity sorted by conviction then yield.
+    """
+    from collections import defaultdict
+    from datetime import date as date_type, timedelta
+
+    if portfolio is None:
+        portfolio = PortfolioState()  # NLV=0 → sizing falls back to $1M
+
+    by_symbol: dict[str, list[AlphaSignal]] = defaultdict(list)
+    for s in all_signals:
+        by_symbol[s.symbol].append(s)
+
+    price_data = {sym: (mkt, hist, chain) for sym, mkt, hist, chain, _ in watchlist_data}
+    target_exp = date_type.today() + timedelta(days=30)
+
+    recommendations: list[SizedOpportunity] = []
+    for symbol, sigs in by_symbol.items():
+        if symbol not in price_data:
+            continue
+        _, hist, chain = price_data[symbol]
+
+        strikes = find_smart_strikes(symbol, chain, hist, "sell_put")
+        if not strikes:
+            continue
+
+        sized = size_position(
+            symbol=symbol,
+            trade_type="sell_put",
+            strike=strikes[0],
+            expiration=target_exp,
+            signals=sigs,
+            portfolio=portfolio,
+        )
+        recommendations.append(sized)
+
+    # Sort: high > medium > low, then by annualized yield descending
+    conviction_rank = {"high": 0, "medium": 1, "low": 2}
+    recommendations.sort(
+        key=lambda r: (conviction_rank.get(r.conviction, 9), -r.annualized_yield),
+    )
+    return recommendations
+
+
+# ---------------------------------------------------------------------------
 # Local briefing formatter (no Claude API needed)
 # ---------------------------------------------------------------------------
 
@@ -147,6 +209,9 @@ def format_local_briefing(
     all_signals: list[AlphaSignal],
     watchlist_data: list[tuple[str, MarketContext, PriceHistory, OptionsChain, EventCalendar]],
     tax_alerts: list[str],
+    recommendations: list[SizedOpportunity] | None = None,
+    intel_contexts: list[IntelligenceContext] | None = None,
+    analyst_brief: str | None = None,
 ) -> str:
     """Format a rich text briefing from live data — no API key required."""
     today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
@@ -166,6 +231,72 @@ def format_local_briefing(
     lines.append(f"\n━━ REGIME ━━")
     lines.append(f"  {regime_emoji.get(regime.regime, regime.regime.upper())} "
                  f"VIX {vix:.1f} | SPY {spy_change:+.2%} | {regime.severity}")
+
+    # ACTION PLAN — the most important section
+    if recommendations is not None:
+        trades = [r for r in recommendations if r.conviction in ("high", "medium")]
+        watch = [r for r in recommendations if r.conviction == "low"]
+
+        lines.append(f"\n━━ ACTION PLAN ━━")
+        if trades:
+            for r in trades:
+                tag = ">>>" if r.conviction == "high" else " >>"
+                sig_names = ", ".join(s.signal_type.value for s in r.signals)
+                lines.append(
+                    f"  {tag} {r.symbol} — SELL {r.contracts}x "
+                    f"${r.strike}P @ ${r.premium}"
+                )
+                lines.append(
+                    f"      {r.conviction.upper()} conviction | "
+                    f"{r.annualized_yield:.0%} ann. yield | "
+                    f"${r.capital_deployed:,.0f} capital ({r.portfolio_pct:.1%} NLV)"
+                )
+                lines.append(f"      Signals: {sig_names}")
+                if r.smart_strike and r.smart_strike.technical_reason:
+                    lines.append(f"      Strike at {r.smart_strike.technical_reason}")
+        else:
+            lines.append("  No actionable trades (need 2+ converging signals).")
+
+        if watch:
+            lines.append(f"\n  WATCH LIST (low conviction — monitor, don't trade):")
+            for r in watch:
+                sig_names = ", ".join(s.signal_type.value for s in r.signals)
+                lines.append(f"    {r.symbol}: {sig_names} (strength "
+                             f"{max(s.strength for s in r.signals):.0f}) — "
+                             f"needs more signals to confirm")
+
+        if not trades and not watch:
+            lines.append("  No signals fired. Sit tight.")
+    else:
+        lines.append(f"\n━━ ACTION PLAN ━━")
+        lines.append("  (sizing pipeline not run)")
+
+    # Analyst brief (Claude-powered reasoning)
+    if analyst_brief:
+        lines.append(f"\n━━ ANALYST BRIEF ━━")
+        lines.append(analyst_brief)
+
+    # TradingView consensus summary
+    if intel_contexts:
+        tv_available = [c for c in intel_contexts if c.technical_consensus]
+        if tv_available:
+            lines.append(f"\n━━ TRADINGVIEW CONSENSUS ━━")
+            for ctx in tv_available:
+                tc = ctx.technical_consensus
+                agreement = ""
+                if ctx.quant.signal_count > 0:
+                    quant_bullish = ctx.quant.avg_strength > 50
+                    tv_bullish = tc.overall in ("BUY", "STRONG_BUY")
+                    if quant_bullish == tv_bullish:
+                        agreement = " [AGREES with signals]"
+                    else:
+                        agreement = " [DISSENTS from signals]"
+                lines.append(
+                    f"  {ctx.symbol}: {tc.overall} "
+                    f"({tc.buy_count}B/{tc.neutral_count}N/{tc.sell_count}S) "
+                    f"| MA: {tc.moving_averages} | Osc: {tc.oscillators}"
+                    f"{agreement}"
+                )
 
     # Signal flash
     lines.append(f"\n━━ SIGNAL FLASH ━━")
@@ -199,41 +330,6 @@ def format_local_briefing(
             f"{mkt.price_change_1d:>+7.1f}% {mkt.price_change_5d:>+7.1f}% "
             f"{mkt.price_vs_52w_high:>+7.1f}% {rsi_str:>6} {iv_str:>8}"
         )
-
-    # Dip opportunities (biggest 1d losers)
-    losers = sorted(watchlist_data, key=lambda x: x[1].price_change_1d)
-    dips = [(s, m) for s, m, _, _, _ in losers if m.price_change_1d < -1.0]
-    if dips:
-        lines.append(f"\n━━ DIP OPPORTUNITIES ━━")
-        for sym, mkt in dips[:5]:
-            lines.append(f"  {sym}: {mkt.price_change_1d:+.1f}% today — "
-                         f"premium likely elevated")
-
-    # Support proximity
-    near_support = []
-    for symbol, mkt, hist, _, _ in watchlist_data:
-        price = float(mkt.price)
-        if hist.sma_200 and price > 0:
-            pct = (price - float(hist.sma_200)) / float(hist.sma_200) * 100
-            if 0 < pct < 5:
-                near_support.append((symbol, "200 SMA", pct))
-        if hist.sma_50 and price > 0:
-            pct = (price - float(hist.sma_50)) / float(hist.sma_50) * 100
-            if 0 < pct < 3:
-                near_support.append((symbol, "50 SMA", pct))
-
-    if near_support:
-        lines.append(f"\n━━ NEAR SUPPORT ━━")
-        for sym, level, pct in near_support:
-            lines.append(f"  {sym}: {pct:.1f}% above {level}")
-
-    # Oversold
-    oversold = [(s, h.rsi_14) for s, _, h, _, _ in watchlist_data
-                if h.rsi_14 is not None and h.rsi_14 < 35]
-    if oversold:
-        lines.append(f"\n━━ OVERSOLD ━━")
-        for sym, rsi in sorted(oversold, key=lambda x: x[1]):
-            lines.append(f"  {sym}: RSI {rsi:.0f}")
 
     # Earnings upcoming
     from datetime import date, timedelta
@@ -305,12 +401,43 @@ async def run_analysis_cycle(
                          signal=s.signal_type.value, strength=s.strength)
         all_signals.extend(signals)
 
-    # 5. Risk checks
+    # 5. Build intelligence contexts
+    intel_contexts: list[IntelligenceContext] = []
+    by_symbol_signals: dict[str, list[AlphaSignal]] = {}
+    for s in all_signals:
+        by_symbol_signals.setdefault(s.symbol, []).append(s)
+
+    for symbol, mkt, hist, chain, cal in watchlist_data:
+        # TradingView consensus (cached, graceful failure)
+        tv_consensus = fetch_tradingview_consensus(symbol)
+
+        ctx = build_intelligence_context(
+            symbol=symbol,
+            signals=by_symbol_signals.get(symbol, []),
+            market=mkt,
+            price_history=hist,
+            chain=chain,
+            calendar=cal,
+            technical_consensus=tv_consensus,
+        )
+        intel_contexts.append(ctx)
+
+    # 6. Claude analyst brief (opt-in, requires ANTHROPIC_API_KEY)
+    analyst_brief = None
+    contexts_with_signals = [c for c in intel_contexts if c.quant.signal_count > 0]
+    if contexts_with_signals:
+        regime_str = f"{regime.regime.upper()} — VIX {vix:.1f}, SPY {spy_change:+.2%}"
+        analyst_brief = await generate_analyst_brief(contexts_with_signals, regime_str)
+
+    # 7. Build sized recommendations from signals
+    recommendations = build_recommendations(all_signals, watchlist_data)
+
+    # 8. Risk checks
     router = AccountRouter()
     liquidity_ok, liquidity_msg = check_liquidity_health(router)
     tax_alerts = generate_tax_alerts([])
 
-    # 6. Build and print briefing
+    # 9. Build and print briefing
     briefing = format_local_briefing(
         regime=regime,
         vix=vix,
@@ -318,6 +445,9 @@ async def run_analysis_cycle(
         all_signals=all_signals,
         watchlist_data=watchlist_data,
         tax_alerts=tax_alerts,
+        recommendations=recommendations,
+        intel_contexts=intel_contexts,
+        analyst_brief=analyst_brief,
     )
     print(briefing)
 

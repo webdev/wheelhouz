@@ -379,3 +379,62 @@ class TestClaudeReasoning:
         assert "SYM0" in prompt
         assert "SYM4" in prompt
         assert "SYM5" not in prompt
+
+
+class TestBriefingWiring:
+    def test_format_local_briefing_accepts_intel_contexts(self) -> None:
+        """format_local_briefing should accept and render intel_contexts."""
+        from datetime import datetime
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+        from tests.fixtures.intelligence import make_intelligence_context, make_technical_consensus
+
+        regime = RegimeState(
+            regime="hold", vix=19.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70, timestamp=datetime.utcnow(),
+        )
+        ctx = make_intelligence_context(
+            symbol="NVDA",
+            technical_consensus=make_technical_consensus(overall="BUY"),
+        )
+
+        # Minimal valid call with the new parameters
+        briefing = format_local_briefing(
+            regime=regime,
+            vix=19.0,
+            spy_change=0.005,
+            all_signals=[],
+            watchlist_data=[],
+            tax_alerts=[],
+            recommendations=None,
+            intel_contexts=[ctx],
+            analyst_brief="Test analyst brief content",
+        )
+
+        assert "TRADINGVIEW CONSENSUS" in briefing
+        assert "NVDA" in briefing
+        assert "BUY" in briefing
+        assert "ANALYST BRIEF" in briefing
+        assert "Test analyst brief content" in briefing
+
+    def test_format_local_briefing_works_without_intel(self) -> None:
+        """format_local_briefing should work with no intel contexts (backward compat)."""
+        from datetime import datetime
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+
+        regime = RegimeState(
+            regime="attack", vix=15.0, spy_change_pct=0.01,
+            severity="normal", target_deployed=0.70, timestamp=datetime.utcnow(),
+        )
+        briefing = format_local_briefing(
+            regime=regime,
+            vix=15.0,
+            spy_change=0.01,
+            all_signals=[],
+            watchlist_data=[],
+            tax_alerts=[],
+        )
+
+        assert "WHEEL COPILOT" in briefing
+        assert "TRADINGVIEW CONSENSUS" not in briefing

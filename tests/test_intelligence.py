@@ -438,3 +438,78 @@ class TestBriefingWiring:
 
         assert "WHEEL COPILOT" in briefing
         assert "TRADINGVIEW CONSENSUS" not in briefing
+
+
+class TestPortfolioLoading:
+    def test_alpaca_position_to_position(self) -> None:
+        """Convert an AlpacaPosition to the shared Position model."""
+        from src.data.portfolio import alpaca_position_to_position
+        from src.execution.alpaca_client import AlpacaPosition
+
+        ap = AlpacaPosition(
+            symbol="PLTR260515P00125000",
+            quantity=-1,
+            avg_entry_price=Decimal("1.80"),
+            current_price=Decimal("2.65"),
+            unrealized_pnl=Decimal("-85"),
+            market_value=Decimal("265"),
+        )
+        pos = alpaca_position_to_position(ap)
+
+        assert pos.symbol == "PLTR"
+        assert pos.position_type == "short_put"
+        assert pos.strike == Decimal("125")
+        assert pos.entry_price == Decimal("1.80")
+        assert pos.days_to_expiry >= 0
+
+    def test_load_portfolio_state_from_alpaca(self) -> None:
+        """load_portfolio_state should return PortfolioState with converted positions."""
+        from unittest.mock import patch, MagicMock
+        from src.data.portfolio import load_portfolio_state
+        from src.execution.alpaca_client import AlpacaPosition, AlpacaAccountInfo
+
+        mock_account = AlpacaAccountInfo(
+            equity=Decimal("500000"),
+            buying_power=Decimal("250000"),
+            cash=Decimal("150000"),
+            portfolio_value=Decimal("500000"),
+            positions=[
+                AlpacaPosition(
+                    symbol="NVDA260515P00130000",
+                    quantity=-2,
+                    avg_entry_price=Decimal("3.20"),
+                    current_price=Decimal("2.50"),
+                    unrealized_pnl=Decimal("140"),
+                    market_value=Decimal("500"),
+                ),
+            ],
+        )
+
+        mock_client = MagicMock()
+        mock_client.get_account.return_value = mock_account
+        with patch("src.data.portfolio.AlpacaPaperClient", return_value=mock_client):
+            state = load_portfolio_state()
+
+        assert state.buying_power == Decimal("250000")
+        assert len(state.positions) == 1
+        assert state.positions[0].symbol == "NVDA"
+        assert state.concentration.get("NVDA", 0) > 0
+
+    def test_load_portfolio_state_empty(self) -> None:
+        """load_portfolio_state returns empty state when no positions."""
+        from unittest.mock import patch, MagicMock
+        from src.data.portfolio import load_portfolio_state
+        from src.execution.alpaca_client import AlpacaAccountInfo
+
+        mock_account = AlpacaAccountInfo(
+            equity=Decimal("500000"),
+            buying_power=Decimal("500000"),
+        )
+
+        mock_client = MagicMock()
+        mock_client.get_account.return_value = mock_account
+        with patch("src.data.portfolio.AlpacaPaperClient", return_value=mock_client):
+            state = load_portfolio_state()
+
+        assert state.positions == []
+        assert state.buying_power == Decimal("500000")

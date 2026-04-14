@@ -7,6 +7,7 @@ today, it tells you to consider closing it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 
 import structlog
@@ -90,11 +91,17 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
                       f"buy back for ${loss_dollars:,.0f} loss")
             return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
 
-    # Earnings conflict — only CLOSE NOW for short-dated positions (DTE <= 30)
-    # where earnings is truly imminent. Long-dated options were sold knowing
-    # earnings would occur; just flag as WATCH.
-    if context.portfolio.earnings_conflict and position.days_to_expiry <= 30:
-        reason = "Earnings imminent — close before report"
+    # Earnings conflict — only flag if earnings falls BEFORE the position's
+    # expiration. A put expiring May 1 doesn't care about May 5 earnings.
+    earnings_date = context.events.next_earnings if context.events else None
+    earnings_before_expiry = (
+        earnings_date is not None
+        and position.expiration is not None
+        and earnings_date < position.expiration
+    )
+    if earnings_before_expiry and position.days_to_expiry <= 30:
+        days_to_earnings = (earnings_date - date.today()).days
+        reason = f"Earnings in {days_to_earnings}d, position expires after — close or roll before report"
         return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
 
     # 2. TAKE PROFIT — captured >75% of premium (short options only)
@@ -107,8 +114,9 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
     watch_reasons: list[str] = []
 
     # Earnings within window but long-dated — note it, don't panic
-    if context.portfolio.earnings_conflict and position.days_to_expiry > 30:
-        watch_reasons.append("Earnings before expiration — monitor around report")
+    if earnings_before_expiry and position.days_to_expiry > 30:
+        days_to_earnings = (earnings_date - date.today()).days
+        watch_reasons.append(f"Earnings in {days_to_earnings}d — monitor around report")
 
     # TradingView flipped strongly bearish
     tc = context.technical_consensus

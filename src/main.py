@@ -433,19 +433,42 @@ def format_local_briefing(
         lines.append(f"\n━━ ANALYST BRIEF ━━")
         lines.append(analyst_brief)
 
-    # ── MARKET — compact reference table ──
-    lines.append(f"\n━━ MARKET ━━")
-    lines.append(f"  {'Symbol':<6} {'Price':>9} {'1d':>7} {'5d':>7} "
-                 f"{'52wH':>7} {'RSI':>4} {'IV':>4}")
-    lines.append(f"  {'-' * 50}")
+    # ── NOTABLE — only flag outliers worth knowing about ──
+    notables: list[str] = []
     for symbol, mkt, hist, _, _ in watchlist_data:
-        rsi_str = f"{hist.rsi_14:.0f}" if hist.rsi_14 is not None else "--"
-        iv_str = f"{mkt.iv_rank:.0f}" if mkt.iv_rank > 0 else "--"
-        lines.append(
-            f"  {symbol:<6} ${float(mkt.price):>8,.2f} "
-            f"{mkt.price_change_1d:>+6.1f}% {mkt.price_change_5d:>+6.1f}% "
-            f"{mkt.price_vs_52w_high:>+6.1f}% {rsi_str:>4} {iv_str:>4}"
-        )
+        flags: list[str] = []
+        rsi = hist.rsi_14
+        iv = mkt.iv_rank
+
+        # Oversold / overbought
+        if rsi is not None and rsi < 30:
+            flags.append(f"RSI {rsi:.0f} (oversold)")
+        elif rsi is not None and rsi > 75:
+            flags.append(f"RSI {rsi:.0f} (overbought)")
+
+        # Premium-rich or premium-dead
+        if iv >= 80:
+            flags.append(f"IV rank {iv:.0f} (rich premium)")
+        elif iv > 0 and iv < 20:
+            flags.append(f"IV rank {iv:.0f} (cheap — don't sell)")
+
+        # Big movers
+        if mkt.price_change_5d <= -10:
+            flags.append(f"5d {mkt.price_change_5d:+.1f}%")
+        elif mkt.price_change_5d >= 10:
+            flags.append(f"5d {mkt.price_change_5d:+.1f}%")
+
+        # Deep drawdown from highs
+        if mkt.price_vs_52w_high <= -35:
+            flags.append(f"{mkt.price_vs_52w_high:+.0f}% from 52w high")
+
+        if flags:
+            notables.append(f"  {symbol}: {' | '.join(flags)}")
+
+    if notables:
+        lines.append(f"\n━━ NOTABLE ━━")
+        for n in notables:
+            lines.append(n)
 
     lines.append(f"\n{'=' * 60}")
     return "\n".join(lines)

@@ -66,7 +66,12 @@ def calculate_iv_rank(
     rv_min = float(rolling_rv.min())
     rv_max = float(rolling_rv.max())
     hv_30d = float(rolling_rv.iloc[-1])
-    iv_as_pct = current_iv * 100
+
+    # Use broker-supplied IV if available, otherwise use HV as proxy
+    if current_iv > 0:
+        iv_as_pct = current_iv * 100
+    else:
+        iv_as_pct = hv_30d  # HV-based proxy
 
     # IV Rank
     if rv_max - rv_min > 0:
@@ -202,11 +207,8 @@ def fetch_market_context(
     sma_200 = sum(full_closes[-200:]) / min(len(full_closes), 200) if full_closes else price
     vs_200sma = ((price - sma_200) / sma_200 * 100) if sma_200 else 0.0
 
-    # IV rank (uses current_iv from broker chain, or 0 as fallback)
-    iv_data = calculate_iv_rank(symbol, current_iv) if current_iv > 0 else {
-        "iv_rank": 0.0, "iv_percentile": 0.0,
-        "hv_30d": 0.0, "iv_30d": 0.0, "iv_hv_spread": 0.0,
-    }
+    # IV rank — always calculate, using HV proxy if broker IV unavailable
+    iv_data = calculate_iv_rank(symbol, current_iv)
 
     # VIX context
     vix_val: float | None = None

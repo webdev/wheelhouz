@@ -725,8 +725,8 @@ class TestIntegrationPipeline:
 
 
 class TestTVConvictionAdjustment:
-    def test_tv_sell_downgrades_conviction(self) -> None:
-        """SELL consensus should downgrade MEDIUM → LOW."""
+    def test_tv_strong_sell_forces_skip(self) -> None:
+        """STRONG_SELL always forces SKIP regardless of starting conviction."""
         from src.main import _apply_tv_adjustment
         from src.models.analysis import SizedOpportunity
 
@@ -735,9 +735,25 @@ class TestTVConvictionAdjustment:
             expiration=None, premium=Decimal("1.80"), contracts=1,
             capital_deployed=Decimal("12500"), portfolio_pct=0.012,
             yield_on_capital=0.014, annualized_yield=0.17,
-            conviction="medium", reasoning="test",
+            conviction="high", reasoning="test",
         )
         result = _apply_tv_adjustment(sized, "STRONG_SELL")
+        assert result.conviction == "skip"
+        assert "downgraded" in result.reasoning
+
+    def test_tv_sell_caps_at_low(self) -> None:
+        """SELL caps conviction at LOW — never actionable, watch list only."""
+        from src.main import _apply_tv_adjustment
+        from src.models.analysis import SizedOpportunity
+
+        sized = SizedOpportunity(
+            symbol="ADBE", trade_type="sell_put", strike=Decimal("400"),
+            expiration=None, premium=Decimal("5.00"), contracts=1,
+            capital_deployed=Decimal("40000"), portfolio_pct=0.04,
+            yield_on_capital=0.012, annualized_yield=0.15,
+            conviction="high", reasoning="test",
+        )
+        result = _apply_tv_adjustment(sized, "SELL")
         assert result.conviction == "low"
         assert "downgraded" in result.reasoning
 
@@ -757,8 +773,8 @@ class TestTVConvictionAdjustment:
         assert result.conviction == "medium"
         assert "upgraded" in result.reasoning
 
-    def test_tv_sell_downgrades_low_to_skip(self) -> None:
-        """SELL on LOW conviction → SKIP (filtered from action plan)."""
+    def test_tv_sell_keeps_low_at_low(self) -> None:
+        """SELL on LOW conviction → stays LOW (already at cap)."""
         from src.main import _apply_tv_adjustment
         from src.models.analysis import SizedOpportunity
 
@@ -770,7 +786,7 @@ class TestTVConvictionAdjustment:
             conviction="low", reasoning="test",
         )
         result = _apply_tv_adjustment(sized, "SELL")
-        assert result.conviction == "skip"
+        assert result.conviction == "low"  # already at cap, no change
 
     def test_tv_neutral_no_change(self) -> None:
         """NEUTRAL consensus should not change conviction."""

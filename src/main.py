@@ -226,14 +226,19 @@ _CONVICTION_LEVELS = ["skip", "low", "medium", "high"]
 def _apply_tv_adjustment(sized: SizedOpportunity, tv_overall: str) -> SizedOpportunity:
     """Adjust conviction based on TradingView consensus.
 
-    SELL/STRONG_SELL → downgrade one level. BUY/STRONG_BUY → upgrade one level.
-    TradingView can veto or boost conviction, but never initiates a trade.
+    Bearish TV consensus vetoes or heavily penalizes trades:
+    - STRONG_SELL → force SKIP (never trade against strong crowd consensus)
+    - SELL → cap at LOW (watch list only — the crowd sees something)
+    - BUY/STRONG_BUY → upgrade one level (crowd confirms thesis)
+    - NEUTRAL → no change
     """
     current_idx = _CONVICTION_LEVELS.index(sized.conviction) if sized.conviction in _CONVICTION_LEVELS else 1
     original = sized.conviction
 
-    if tv_overall in ("SELL", "STRONG_SELL"):
-        new_idx = max(0, current_idx - 1)
+    if tv_overall == "STRONG_SELL":
+        new_idx = 0  # skip
+    elif tv_overall == "SELL":
+        new_idx = min(current_idx, 1)  # cap at LOW
     elif tv_overall in ("BUY", "STRONG_BUY"):
         new_idx = min(len(_CONVICTION_LEVELS) - 1, current_idx + 1)
     else:

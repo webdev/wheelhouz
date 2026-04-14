@@ -34,6 +34,8 @@ from src.risk import check_liquidity_health, generate_tax_alerts
 from src.models.account import AccountRouter
 from src.data.tradingview import fetch_tradingview_consensus
 from src.intelligence.builder import build_intelligence_context
+from src.intelligence.position_review import PositionReview, review_position, format_position_review
+from src.data.portfolio import load_portfolio_state
 from src.delivery.reasoning import generate_analyst_brief
 from src.models.intelligence import IntelligenceContext
 
@@ -212,6 +214,7 @@ def format_local_briefing(
     recommendations: list[SizedOpportunity] | None = None,
     intel_contexts: list[IntelligenceContext] | None = None,
     analyst_brief: str | None = None,
+    position_reviews: list[PositionReview] | None = None,
 ) -> str:
     """Format a rich text briefing from live data — no API key required."""
     today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
@@ -231,6 +234,11 @@ def format_local_briefing(
     lines.append(f"\n━━ REGIME ━━")
     lines.append(f"  {regime_emoji.get(regime.regime, regime.regime.upper())} "
                  f"VIX {vix:.1f} | SPY {spy_change:+.2%} | {regime.severity}")
+
+    # Position review (before action plan — manage existing risk first)
+    if position_reviews:
+        lines.append(f"\n━━ POSITION REVIEW ━━")
+        lines.append(format_position_review(position_reviews))
 
     # ACTION PLAN — the most important section
     if recommendations is not None:
@@ -423,6 +431,23 @@ async def run_analysis_cycle(
         )
         intel_contexts.append(ctx)
 
+    # 5b. Load portfolio and run position review
+    portfolio_state = None
+    position_reviews = []
+    try:
+        portfolio_state = load_portfolio_state()
+        if portfolio_state.positions:
+            for pos in portfolio_state.positions:
+                # Find matching intelligence context
+                matching_ctx = next(
+                    (c for c in intel_contexts if c.symbol == pos.symbol), None
+                )
+                if matching_ctx:
+                    review = review_position(pos, matching_ctx)
+                    position_reviews.append(review)
+    except Exception as e:
+        log.warning("portfolio_load_skipped", error=str(e))
+
     # 6. Claude analyst brief (opt-in, requires ANTHROPIC_API_KEY)
     analyst_brief = None
     contexts_with_signals = [c for c in intel_contexts if c.quant.signal_count > 0]
@@ -449,6 +474,7 @@ async def run_analysis_cycle(
         recommendations=recommendations,
         intel_contexts=intel_contexts,
         analyst_brief=analyst_brief,
+        position_reviews=position_reviews,
     )
     print(briefing)
 

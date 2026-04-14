@@ -2,6 +2,7 @@
 """Tests for intelligence mesh models."""
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 
 from src.models.intelligence import (
@@ -513,3 +514,141 @@ class TestPortfolioLoading:
 
         assert state.positions == []
         assert state.buying_power == Decimal("500000")
+
+
+class TestPositionReview:
+    def test_close_now_when_loss_stop_hit(self) -> None:
+        """Should recommend CLOSE NOW when loss exceeds 2x premium."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="PLTR", position_type="short_put", quantity=1,
+            strike=Decimal("125"), expiration=date(2026, 5, 15),
+            entry_price=Decimal("1.80"), current_price=Decimal("4.50"),
+            underlying_price=Decimal("120"), cost_basis=Decimal("12500"),
+            delta=-0.45, theta=0.03, gamma=0.01, vega=0.08, iv=0.55,
+            days_to_expiry=32, unrealized_pnl=Decimal("-270"),
+        )
+        ctx = make_intelligence_context(
+            symbol="PLTR",
+            quant=make_quant_intelligence(trend_direction="downtrend"),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "CLOSE NOW"
+        assert "loss stop" in result.reasoning.lower()
+
+    def test_hold_when_thesis_intact(self) -> None:
+        """Should recommend HOLD when position is healthy."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import (
+            make_intelligence_context, make_quant_intelligence, make_technical_consensus,
+        )
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="NVDA", position_type="short_put", quantity=2,
+            strike=Decimal("130"), expiration=date(2026, 5, 15),
+            entry_price=Decimal("3.20"), current_price=Decimal("1.50"),
+            underlying_price=Decimal("145"), cost_basis=Decimal("26000"),
+            delta=-0.15, theta=0.05, gamma=0.01, vega=0.06, iv=0.40,
+            days_to_expiry=32, unrealized_pnl=Decimal("340"),
+        )
+        ctx = make_intelligence_context(
+            symbol="NVDA",
+            quant=make_quant_intelligence(trend_direction="uptrend"),
+            technical_consensus=make_technical_consensus(overall="BUY"),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "HOLD"
+
+    def test_take_profit_when_most_of_premium_captured(self) -> None:
+        """Should recommend TAKE PROFIT when >75% of premium captured."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="AAPL", position_type="short_put", quantity=1,
+            strike=Decimal("200"), expiration=date(2026, 5, 15),
+            entry_price=Decimal("4.00"), current_price=Decimal("0.80"),
+            underlying_price=Decimal("215"), cost_basis=Decimal("20000"),
+            delta=-0.08, theta=0.02, gamma=0.005, vega=0.03, iv=0.25,
+            days_to_expiry=32, unrealized_pnl=Decimal("320"),
+        )
+        ctx = make_intelligence_context(
+            symbol="AAPL",
+            quant=make_quant_intelligence(trend_direction="uptrend"),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "TAKE PROFIT"
+
+    def test_watch_closely_when_tv_flips(self) -> None:
+        """Should recommend WATCH CLOSELY when TradingView flips bearish."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import (
+            make_intelligence_context, make_quant_intelligence, make_technical_consensus,
+        )
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="META", position_type="short_put", quantity=1,
+            strike=Decimal("450"), expiration=date(2026, 5, 15),
+            entry_price=Decimal("6.50"), current_price=Decimal("5.00"),
+            underlying_price=Decimal("460"), cost_basis=Decimal("45000"),
+            delta=-0.30, theta=0.04, gamma=0.01, vega=0.10, iv=0.45,
+            days_to_expiry=32, unrealized_pnl=Decimal("150"),
+        )
+        ctx = make_intelligence_context(
+            symbol="META",
+            quant=make_quant_intelligence(trend_direction="range"),
+            technical_consensus=make_technical_consensus(overall="STRONG_SELL"),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "WATCH CLOSELY"
+
+
+class TestPositionReviewBriefing:
+    def test_position_review_renders_in_briefing(self) -> None:
+        """format_local_briefing should render POSITION REVIEW when reviews provided."""
+        from datetime import datetime
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+        from src.intelligence.position_review import PositionReview
+
+        regime = RegimeState(
+            regime="hold", vix=19.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70, timestamp=datetime.utcnow(),
+        )
+        reviews = [
+            PositionReview(
+                symbol="PLTR", action="CLOSE NOW",
+                reasoning="Loss stop hit: current $4.50 is 2.5x entry $1.80",
+                current_pnl=Decimal("-270"), days_to_expiry=32,
+            ),
+            PositionReview(
+                symbol="NVDA", action="HOLD",
+                reasoning="Thesis intact. TradingView: BUY. Trend: uptrend",
+                current_pnl=Decimal("340"), days_to_expiry=32,
+            ),
+        ]
+
+        briefing = format_local_briefing(
+            regime=regime,
+            vix=19.0,
+            spy_change=0.005,
+            all_signals=[],
+            watchlist_data=[],
+            tax_alerts=[],
+            position_reviews=reviews,
+        )
+
+        assert "POSITION REVIEW" in briefing
+        assert "PLTR" in briefing
+        assert "CLOSE NOW" in briefing
+        assert "HOLD" in briefing

@@ -271,9 +271,11 @@ class TestTradingView:
             indicators={},
         )
 
-        with patch("src.data.tradingview.TA_Handler", return_value=mock_handler) as mock_cls:
-            from src.data.tradingview import _tv_cache
-            _tv_cache.pop("CACHE_TEST_SYM", None)  # ensure clean state for this symbol
+        with patch("src.data.tradingview.TA_Handler", return_value=mock_handler) as mock_cls, \
+             patch("src.data.tradingview._read_disk_cache", return_value=None), \
+             patch("src.data.tradingview._write_disk_cache"):
+            from src.data.tradingview import _mem_cache
+            _mem_cache.pop("CACHE_TEST_SYM", None)  # ensure clean state for this symbol
             result1 = fetch_tradingview_consensus("CACHE_TEST_SYM")
             result2 = fetch_tradingview_consensus("CACHE_TEST_SYM")
 

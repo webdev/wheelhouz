@@ -1,6 +1,7 @@
 # Secrets
 config/secrets.env
 config/.etrade_tokens.json
+config/.tv_cache/
 .env
 *.env
 !config/.env.example

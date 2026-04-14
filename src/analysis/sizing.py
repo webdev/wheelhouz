@@ -76,10 +76,11 @@ def size_position(
 
     if capital_per_contract > 0:
         contracts = int(total_capital / capital_per_contract)
-        # Allow 1-contract override for MEDIUM+ only.
-        # LOW conviction with 0 affordable contracts = skip.
-        if contracts == 0 and conviction != "low":
-            if capital_per_contract <= float(nlv) * 0.20:
+        # Allow 1-contract minimum if collateral fits within position limits.
+        # Even LOW conviction should produce a proposal — the user decides.
+        if contracts == 0:
+            max_single_trade = 0.05 if conviction == "low" else 0.10
+            if capital_per_contract <= float(nlv) * max_single_trade:
                 contracts = 1
     else:
         contracts = 1

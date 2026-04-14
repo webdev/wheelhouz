@@ -131,7 +131,7 @@ def _build_client() -> tuple[object, str] | None:
     if has_aws_creds:
         region = os.environ.get("AWS_REGION", "us-west-2")
         client = anthropic.AsyncAnthropicBedrock(aws_region=region)
-        model = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6-v1")
+        model = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-v2-20250514")
         logger.info("using_bedrock", region=region, model=model)
         return client, model
 

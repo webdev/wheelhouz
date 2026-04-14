@@ -234,12 +234,15 @@ def build_recommendations(
                 continue
 
             # Size at LOW conviction (no quant signals to boost it)
-            from src.models.signals import SignalType
+            from src.models.enums import SignalType
+            from datetime import datetime as dt_type
             tv_signal = AlphaSignal(
                 symbol=ctx.symbol,
                 signal_type=SignalType.IV_RANK_SPIKE,
                 strength=0.5,
-                details=f"TV {tc.overall}, IV rank {ctx.quant.iv_rank:.0f}",
+                direction="sell_put",
+                reasoning=f"TV {tc.overall}, IV rank {ctx.quant.iv_rank:.0f}",
+                expires=dt_type.now() + timedelta(hours=24),
             )
             sized = size_position(
                 symbol=ctx.symbol,
@@ -452,7 +455,8 @@ def format_local_briefing(
             lines.append(f"  Tax: {alert}")
 
     # ── Nothing to do ──
-    if not (urgent_positions or high_trades or medium_trades or low_trades):
+    if not (urgent_positions or high_trades or medium_trades or low_trades
+            or watch_positions):
         lines.append(f"\n  No signals fired. Sit tight.")
 
     # ── ANALYST BRIEF — Claude reasoning (when available) ──

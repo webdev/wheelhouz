@@ -285,11 +285,12 @@ def format_local_briefing(
                 tc = ctx.technical_consensus
                 agreement = ""
                 if ctx.quant.signal_count > 0:
-                    quant_bullish = ctx.quant.avg_strength > 50
-                    tv_bullish = tc.overall in ("BUY", "STRONG_BUY")
-                    if quant_bullish == tv_bullish:
+                    # Signals fired = system recommends selling puts (bullish thesis)
+                    tv_bullish = tc.overall in ("BUY", "STRONG_BUY", "NEUTRAL")
+                    tv_bearish = tc.overall in ("SELL", "STRONG_SELL")
+                    if tv_bullish:
                         agreement = " [AGREES with signals]"
-                    else:
+                    elif tv_bearish:
                         agreement = " [DISSENTS from signals]"
                 lines.append(
                     f"  {ctx.symbol}: {tc.overall} "

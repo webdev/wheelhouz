@@ -370,7 +370,7 @@ class TestClaudeReasoning:
         from tests.fixtures.intelligence import make_intelligence_context
         ctx = make_intelligence_context(technical_consensus=None)
         prompt = build_reasoning_prompt([ctx])
-        assert "TradingView: unavailable" in prompt
+        assert "TRADINGVIEW: unavailable" in prompt
 
     def test_build_prompt_caps_at_5_symbols(self) -> None:
         from tests.fixtures.intelligence import make_intelligence_context

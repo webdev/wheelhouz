@@ -67,7 +67,7 @@ def build_reasoning_prompt(contexts: list[IntelligenceContext]) -> str:
                          f"({tc.buy_count} buy / {tc.neutral_count} neutral / {tc.sell_count} sell)")
             lines.append(f"  Oscillators: {tc.oscillators} | Moving Averages: {tc.moving_averages}")
         else:
-            lines.append("TRADINGVIEW: TradingView: unavailable")
+            lines.append("TRADINGVIEW: unavailable")
 
         # Options
         opt = ctx.options

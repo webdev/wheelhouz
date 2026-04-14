@@ -24,7 +24,7 @@ from src.analysis.sizing import size_position
 from src.analysis.strikes import find_smart_strikes
 from src.config.loader import load_watchlist
 from src.data.events import fetch_event_calendar
-from src.data.market import fetch_market_context, fetch_price_history
+from src.data.market import fetch_market_context, fetch_options_chain, fetch_price_history
 from src.models.analysis import SizedOpportunity
 from src.models.market import EventCalendar, MarketContext, OptionsChain, PriceHistory
 from src.models.position import PortfolioState
@@ -138,7 +138,7 @@ def fetch_all_watchlist_data(
         try:
             mkt = fetch_market_context(symbol)
             hist = fetch_price_history(symbol)
-            chain = OptionsChain(symbol=symbol)  # yfinance chains are unreliable; stub
+            chain = fetch_options_chain(symbol)
             cal = fetch_event_calendar(symbol)
             results.append((symbol, mkt, hist, chain, cal))
         except Exception as e:
@@ -250,18 +250,33 @@ def format_local_briefing(
             for r in trades:
                 tag = ">>>" if r.conviction == "high" else " >>"
                 sig_names = ", ".join(s.signal_type.value for s in r.signals)
+                exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
                 lines.append(
                     f"  {tag} {r.symbol} — SELL {r.contracts}x "
-                    f"${r.strike}P @ ${r.premium}"
+                    f"${r.strike}P {exp_str} @ ${r.premium} mid"
                 )
                 lines.append(
                     f"      {r.conviction.upper()} conviction | "
                     f"{r.annualized_yield:.0%} ann. yield | "
-                    f"${r.capital_deployed:,.0f} capital ({r.portfolio_pct:.1%} NLV)"
+                    f"delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
+                )
+                lines.append(
+                    f"      Collateral: ${r.capital_deployed:,.0f} "
+                    f"({r.portfolio_pct:.1%} NLV) | "
+                    f"Max profit: ${r.premium * r.contracts * 100:,.0f}"
                 )
                 lines.append(f"      Signals: {sig_names}")
                 if r.smart_strike and r.smart_strike.technical_reason:
                     lines.append(f"      Strike at {r.smart_strike.technical_reason}")
+                # Show real chain data if available
+                if intel_contexts:
+                    ctx_match = next((c for c in intel_contexts if c.symbol == r.symbol), None)
+                    if ctx_match and ctx_match.options and ctx_match.options.chain_available:
+                        opt = ctx_match.options
+                        lines.append(
+                            f"      Chain: IV rank {opt.iv_rank:.0f} | "
+                            f"bid-ask spread {opt.bid_ask_spread_pct:.1f}%"
+                        )
         else:
             lines.append("  No actionable trades (need 2+ converging signals).")
 

@@ -1,5 +1,6 @@
 # Secrets
 config/secrets.env
+config/.etrade_tokens.json
 .env
 *.env
 !config/.env.example

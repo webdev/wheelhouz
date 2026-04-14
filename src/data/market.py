@@ -15,7 +15,7 @@ from typing import Any
 import structlog
 import yfinance as yf
 
-from src.models.market import MarketContext, PriceHistory
+from src.models.market import OptionContract, MarketContext, OptionsChain, PriceHistory
 
 logger = structlog.get_logger()
 
@@ -248,4 +248,67 @@ def fetch_market_context(
         vix=vix_val,
         vix_change_1d=vix_change,
         vix_term_structure=vix_term,
+    )
+
+
+def fetch_options_chain(symbol: str, target_dte: int = 30) -> OptionsChain:
+    """Fetch real options chain from yfinance for nearest monthly expiration."""
+    ticker = yf.Ticker(symbol)
+    try:
+        expirations_str = ticker.options
+    except Exception:
+        logger.warning("options_chain_unavailable", symbol=symbol)
+        return OptionsChain(symbol=symbol)
+
+    if not expirations_str:
+        return OptionsChain(symbol=symbol)
+
+    today = date.today()
+    exp_dates = [date.fromisoformat(e) for e in expirations_str]
+    target_date = today + timedelta(days=target_dte)
+    best_exp = min(exp_dates, key=lambda d: abs((d - target_date).days))
+
+    try:
+        chain = ticker.option_chain(best_exp.isoformat())
+    except Exception as e:
+        logger.warning("options_chain_fetch_failed", symbol=symbol, error=str(e))
+        return OptionsChain(symbol=symbol, expirations=exp_dates)
+
+    def _parse_contracts(df: Any, option_type: str) -> list[OptionContract]:
+        contracts = []
+        for _, row in df.iterrows():
+            try:
+                contracts.append(OptionContract(
+                    strike=Decimal(str(round(float(row["strike"]), 2))),
+                    expiration=best_exp,
+                    option_type=option_type,
+                    bid=Decimal(str(round(float(row.get("bid", 0)), 2))),
+                    ask=Decimal(str(round(float(row.get("ask", 0)), 2))),
+                    mid=Decimal(str(round((float(row.get("bid", 0)) + float(row.get("ask", 0))) / 2, 2))),
+                    volume=int(row.get("volume", 0) or 0),
+                    open_interest=int(row.get("openInterest", 0) or 0),
+                    implied_vol=float(row.get("impliedVolatility", 0) or 0),
+                    delta=0.0,
+                ))
+            except (ValueError, KeyError):
+                continue
+        return contracts
+
+    puts = _parse_contracts(chain.puts, "put")
+    calls = _parse_contracts(chain.calls, "call")
+
+    atm_iv = None
+    if puts:
+        hist = ticker.history(period="1d")
+        if not hist.empty:
+            current_price = float(hist["Close"].iloc[-1])
+            atm_put = min(puts, key=lambda c: abs(float(c.strike) - current_price))
+            atm_iv = atm_put.implied_vol
+
+    return OptionsChain(
+        symbol=symbol,
+        puts=puts,
+        calls=calls,
+        atm_iv=atm_iv,
+        expirations=exp_dates,
     )

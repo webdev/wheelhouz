@@ -60,10 +60,25 @@ def find_smart_strikes(
         if est_delta < min_delta or est_delta > max_delta:
             continue
 
-        # Estimate premium (rough: ATM IV * sqrt(DTE/365) * strike * delta-proxy)
-        atm_iv = chain.atm_iv or 0.30
-        time_factor = (target_dte / 365.0) ** 0.5
-        est_premium = Decimal(str(round(lp * atm_iv * time_factor * est_delta * 0.5, 2)))
+        # Prefer real chain data when available; fall back to estimation
+        real_contract = None
+        if chain.puts and direction == "sell_put":
+            near = [p for p in chain.puts if abs(float(p.strike) - lp) < 1.0]
+            if near:
+                real_contract = near[0]
+        elif chain.calls and direction != "sell_put":
+            near = [c for c in chain.calls if abs(float(c.strike) - lp) < 1.0]
+            if near:
+                real_contract = near[0]
+
+        if real_contract and real_contract.bid > 0:
+            est_premium = real_contract.mid
+            est_delta = abs(real_contract.delta) if real_contract.delta != 0 else est_delta
+        else:
+            # Estimate premium (rough: ATM IV * sqrt(DTE/365) * strike * delta-proxy)
+            atm_iv = chain.atm_iv or 0.30
+            time_factor = (target_dte / 365.0) ** 0.5
+            est_premium = Decimal(str(round(lp * atm_iv * time_factor * est_delta * 0.5, 2)))
 
         if est_premium <= 0:
             continue

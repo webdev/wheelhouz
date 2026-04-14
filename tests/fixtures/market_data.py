@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
-from src.models.market import EventCalendar, MarketContext, OptionsChain, PriceHistory
+from src.models.market import EventCalendar, MarketContext, OptionContract, OptionsChain, PriceHistory
 
 
 def make_market_context(**overrides: Any) -> MarketContext:
@@ -81,19 +81,12 @@ def make_options_chain(**overrides: Any) -> OptionsChain:
     """Create an OptionsChain with sensible defaults."""
     defaults: dict[str, Any] = {
         "symbol": "NVDA",
-        "atm_iv": 0.45,
-        "historical_skew_25d": 0.08,
-        "iv_by_expiry": {
-            "front_month": 0.48,
-            "second_month": 0.44,
-        },
-        "expirations": [
-            date.today() + timedelta(days=7),
-            date.today() + timedelta(days=14),
-            date.today() + timedelta(days=30),
-            date.today() + timedelta(days=45),
-            date.today() + timedelta(days=60),
-        ],
+        "puts": [],
+        "calls": [],
+        "atm_iv": 0.30,
+        "historical_skew_25d": 0.05,
+        "iv_by_expiry": {"front_month": 0.45, "second_month": 0.40},
+        "expirations": [],
     }
     defaults.update(overrides)
     return OptionsChain(**defaults)

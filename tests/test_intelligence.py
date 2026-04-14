@@ -137,3 +137,89 @@ class TestIVRankFix:
                 mkt = fetch_market_context("PLTR", current_iv=0.0)
 
         assert mkt.iv_rank > 0.0
+
+
+import pandas as pd
+from src.models.market import OptionContract, OptionsChain
+
+
+class TestOptionsChain:
+    def test_option_contract_creation(self) -> None:
+        from datetime import date
+        oc = OptionContract(
+            strike=Decimal("125.00"),
+            expiration=date(2026, 5, 15),
+            option_type="put",
+            bid=Decimal("1.45"),
+            ask=Decimal("1.52"),
+            mid=Decimal("1.485"),
+            volume=1500,
+            open_interest=8200,
+            implied_vol=0.42,
+            delta=-0.25,
+        )
+        assert oc.bid == Decimal("1.45")
+        assert oc.delta == -0.25
+
+    def test_options_chain_with_contracts(self) -> None:
+        chain = OptionsChain(
+            symbol="PLTR",
+            puts=[],
+            calls=[],
+        )
+        assert chain.puts == []
+        assert chain.symbol == "PLTR"
+
+    def test_fetch_options_chain_returns_populated_chain(self) -> None:
+        from unittest.mock import patch, MagicMock
+        from datetime import date, timedelta
+        from src.data.market import fetch_options_chain
+
+        exp_date = (date.today() + timedelta(days=30)).isoformat()
+        mock_puts = pd.DataFrame({
+            "strike": [120.0, 125.0, 130.0],
+            "bid": [1.20, 1.80, 2.50],
+            "ask": [1.30, 1.90, 2.60],
+            "volume": [500, 1200, 800],
+            "openInterest": [3000, 8000, 5000],
+            "impliedVolatility": [0.38, 0.42, 0.45],
+        })
+        mock_calls = pd.DataFrame({
+            "strike": [135.0, 140.0],
+            "bid": [2.10, 1.50],
+            "ask": [2.20, 1.60],
+            "volume": [600, 400],
+            "openInterest": [4000, 2000],
+            "impliedVolatility": [0.35, 0.33],
+        })
+
+        mock_chain = MagicMock()
+        mock_chain.puts = mock_puts
+        mock_chain.calls = mock_calls
+
+        mock_ticker = MagicMock()
+        mock_ticker.options = [exp_date]
+        mock_ticker.option_chain.return_value = mock_chain
+        mock_ticker.history.return_value = pd.DataFrame({"Close": [131.0]})
+
+        with patch("src.data.market.yf.Ticker", return_value=mock_ticker):
+            result = fetch_options_chain("PLTR")
+
+        assert len(result.puts) == 3
+        assert len(result.calls) == 2
+        assert result.puts[0].strike == Decimal("120.0")
+        assert result.atm_iv is not None
+
+    def test_fetch_options_chain_graceful_on_empty(self) -> None:
+        from unittest.mock import patch, MagicMock
+        from src.data.market import fetch_options_chain
+
+        mock_ticker = MagicMock()
+        mock_ticker.options = []
+
+        with patch("src.data.market.yf.Ticker", return_value=mock_ticker):
+            result = fetch_options_chain("FAKE")
+
+        assert result.puts == []
+        assert result.calls == []
+        assert result.symbol == "FAKE"

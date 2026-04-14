@@ -104,21 +104,41 @@ class EventCalendar:
 
 
 @dataclass
+class OptionContract:
+    """A single option contract from a real chain."""
+    strike: Decimal
+    expiration: date
+    option_type: str  # "put" or "call"
+    bid: Decimal
+    ask: Decimal
+    mid: Decimal
+    volume: int
+    open_interest: int
+    implied_vol: float
+    delta: float
+
+
+@dataclass
 class OptionsChain:
     """Options chain data for a symbol."""
     symbol: str
+    puts: list[OptionContract] = field(default_factory=list)
+    calls: list[OptionContract] = field(default_factory=list)
     atm_iv: float | None = None
     historical_skew_25d: float | None = None
     iv_by_expiry: dict[str, float] = field(default_factory=dict)
     expirations: list[date] = field(default_factory=list)
 
     def get_iv_at_delta(self, delta: float) -> float | None:
-        """Get IV for the strike nearest to target delta."""
-        # Stub — implemented by data module
-        return None
+        """Look up IV from real chain at nearest delta."""
+        contracts = self.puts if delta < 0 else self.calls
+        if not contracts:
+            return None
+        nearest = min(contracts, key=lambda c: abs(c.delta - delta))
+        return nearest.implied_vol if abs(nearest.delta - delta) < 0.10 else None
 
     def get_expiry_near_dte(self, target_dte: int) -> date | None:
-        """Get the expiration date closest to target DTE."""
+        """Find the expiration closest to target DTE."""
         if not self.expirations:
             return None
         today = date.today()

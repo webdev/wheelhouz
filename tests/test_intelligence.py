@@ -279,3 +279,68 @@ class TestTradingView:
         assert result1 is not None
         assert result1.overall == result2.overall
         assert mock_cls.call_count == 1
+
+
+from src.intelligence.builder import build_intelligence_context
+from tests.fixtures.market_data import make_market_context, make_price_history, make_options_chain, make_event_calendar
+from tests.fixtures.trades import make_alpha_signal
+
+
+class TestIntelligenceBuilder:
+    def test_builds_context_with_signals(self) -> None:
+        from src.models.enums import SignalType
+        signals = [
+            make_alpha_signal(symbol="NVDA", strength=70),
+            make_alpha_signal(symbol="NVDA", strength=65, signal_type=SignalType.IV_RANK_SPIKE),
+        ]
+        mkt = make_market_context(iv_rank=62.0)
+        hist = make_price_history(rsi_14=28.0)
+        chain = make_options_chain()
+        cal = make_event_calendar()
+
+        ctx = build_intelligence_context(
+            symbol="NVDA",
+            signals=signals,
+            market=mkt,
+            price_history=hist,
+            chain=chain,
+            calendar=cal,
+        )
+
+        assert ctx.symbol == "NVDA"
+        assert ctx.quant.signal_count == 2
+        assert ctx.quant.avg_strength == 67.5
+        assert ctx.quant.rsi == 28.0
+        assert ctx.quant.iv_rank == 62.0
+        assert ctx.market is not None
+
+    def test_builds_context_without_tradingview(self) -> None:
+        """Should work when TradingView is unavailable."""
+        ctx = build_intelligence_context(
+            symbol="FAKE",
+            signals=[],
+            market=make_market_context(),
+            price_history=make_price_history(),
+            chain=make_options_chain(),
+            calendar=make_event_calendar(),
+            technical_consensus=None,
+        )
+        assert ctx.technical_consensus is None
+        assert ctx.quant.signal_count == 0
+
+    def test_trend_direction_from_moving_averages(self) -> None:
+        """Downtrend when price below both 50 and 200 SMA."""
+        hist = make_price_history(
+            current_price=Decimal("130"),
+            sma_50=Decimal("145"),
+            sma_200=Decimal("160"),
+        )
+        ctx = build_intelligence_context(
+            symbol="PLTR",
+            signals=[],
+            market=make_market_context(),
+            price_history=hist,
+            chain=make_options_chain(),
+            calendar=make_event_calendar(),
+        )
+        assert ctx.quant.trend_direction == "downtrend"

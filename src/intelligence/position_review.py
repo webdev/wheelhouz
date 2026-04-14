@@ -25,64 +25,81 @@ class PositionReview:
     reasoning: str
     current_pnl: Decimal
     days_to_expiry: int
+    # Position details for display
+    option_type: str = ""       # "put" or "call"
+    strike: Decimal = Decimal("0")
+    expiration: str = ""        # formatted date string
+    position_type: str = ""     # "short_put", "short_call", etc.
+    quantity: int = 0
+    entry_price: Decimal = Decimal("0")
+    current_price: Decimal = Decimal("0")
+    pnl_pct: float = 0.0       # % of premium captured (positive = profit)
+
+
+def _make_review(position: Position, action: str, reasoning: str, pnl: Decimal, pnl_pct: float) -> PositionReview:
+    """Build a PositionReview with full position details."""
+    exp_str = position.expiration.strftime("%b %d") if position.expiration else ""
+    return PositionReview(
+        symbol=position.symbol,
+        action=action,
+        reasoning=reasoning,
+        current_pnl=pnl * 100 * position.quantity,
+        days_to_expiry=position.days_to_expiry,
+        option_type=position.option_type,
+        strike=position.strike,
+        expiration=exp_str,
+        position_type=position.position_type,
+        quantity=position.quantity,
+        entry_price=position.entry_price,
+        current_price=position.current_price,
+        pnl_pct=pnl_pct,
+    )
 
 
 def review_position(position: Position, context: IntelligenceContext) -> PositionReview:
     """Review a single open position against current intelligence.
 
     Priority order:
-    1. CLOSE NOW — loss stop hit, earnings conflict, intelligence consensus bearish
+    1. CLOSE NOW — loss stop hit, earnings imminent + short-dated
     2. TAKE PROFIT — captured >75% of premium
-    3. WATCH CLOSELY — something changed (TV flipped, trend weakening)
+    3. WATCH CLOSELY — something changed (TV flipped, trend weakening, earnings upcoming)
     4. HOLD — thesis intact, everything healthy
     """
     pnl = position.entry_price - position.current_price  # positive = profit for short
     pnl_pct = float(pnl / position.entry_price) if position.entry_price > 0 else 0.0
     loss_multiple = float(position.current_price / position.entry_price) if position.entry_price > 0 else 0.0
 
-    reasons: list[str] = []
-
     # 1. CLOSE NOW checks
     # Loss stop: 2x premium for monthlies, 1.5x for weeklies (DTE <= 10)
     stop_threshold = 1.5 if position.days_to_expiry <= 10 else 2.0
     if loss_multiple >= stop_threshold:
-        reasons.append(f"Loss stop hit: current ${position.current_price} is "
-                       f"{loss_multiple:.1f}x entry ${position.entry_price}")
-        return PositionReview(
-            symbol=position.symbol, action="CLOSE NOW",
-            reasoning=". ".join(reasons),
-            current_pnl=pnl * 100 * position.quantity,
-            days_to_expiry=position.days_to_expiry,
-        )
+        reason = (f"Loss stop hit: current ${position.current_price} is "
+                  f"{loss_multiple:.1f}x entry ${position.entry_price}")
+        return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
 
-    # Earnings conflict
-    if context.portfolio.earnings_conflict:
-        reasons.append("Earnings within expiration window")
-        return PositionReview(
-            symbol=position.symbol, action="CLOSE NOW",
-            reasoning=". ".join(reasons),
-            current_pnl=pnl * 100 * position.quantity,
-            days_to_expiry=position.days_to_expiry,
-        )
+    # Earnings conflict — only CLOSE NOW for short-dated positions (DTE <= 30)
+    # where earnings is truly imminent. Long-dated options were sold knowing
+    # earnings would occur; just flag as WATCH.
+    if context.portfolio.earnings_conflict and position.days_to_expiry <= 30:
+        reason = "Earnings imminent — close before report"
+        return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
 
     # 2. TAKE PROFIT — captured >75% of premium
     if pnl_pct >= 0.75:
-        reasons.append(f"Captured {pnl_pct:.0%} of premium "
-                       f"(${pnl * 100 * position.quantity:,.0f} profit)")
-        return PositionReview(
-            symbol=position.symbol, action="TAKE PROFIT",
-            reasoning=". ".join(reasons),
-            current_pnl=pnl * 100 * position.quantity,
-            days_to_expiry=position.days_to_expiry,
-        )
+        reason = f"Captured {pnl_pct:.0%} of premium (${pnl * 100 * position.quantity:,.0f} profit)"
+        return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct)
 
     # 3. WATCH CLOSELY checks
     watch_reasons: list[str] = []
 
+    # Earnings within window but long-dated — note it, don't panic
+    if context.portfolio.earnings_conflict and position.days_to_expiry > 30:
+        watch_reasons.append("Earnings before expiration — monitor around report")
+
     # TradingView flipped strongly bearish
     tc = context.technical_consensus
     if tc and tc.overall in ("SELL", "STRONG_SELL"):
-        watch_reasons.append(f"TradingView consensus: {tc.overall}")
+        watch_reasons.append(f"TV {tc.overall}")
 
     # Trend is downtrend for a short put position
     if (context.quant.trend_direction == "downtrend"
@@ -94,27 +111,15 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
         watch_reasons.append(f"IV rank dropped to {context.quant.iv_rank:.0f}")
 
     if watch_reasons:
-        return PositionReview(
-            symbol=position.symbol, action="WATCH CLOSELY",
-            reasoning=". ".join(watch_reasons),
-            current_pnl=pnl * 100 * position.quantity,
-            days_to_expiry=position.days_to_expiry,
-        )
+        return _make_review(position, "WATCH CLOSELY", ". ".join(watch_reasons), pnl, pnl_pct)
 
     # 4. HOLD — everything healthy
     hold_reasons = ["Thesis intact"]
     if tc:
-        hold_reasons.append(f"TradingView: {tc.overall}")
+        hold_reasons.append(f"TV {tc.overall}")
     hold_reasons.append(f"Trend: {context.quant.trend_direction}")
-    if pnl > 0:
-        hold_reasons.append(f"P&L: +${pnl * 100 * position.quantity:,.0f}")
 
-    return PositionReview(
-        symbol=position.symbol, action="HOLD",
-        reasoning=". ".join(hold_reasons),
-        current_pnl=pnl * 100 * position.quantity,
-        days_to_expiry=position.days_to_expiry,
-    )
+    return _make_review(position, "HOLD", ". ".join(hold_reasons), pnl, pnl_pct)
 
 
 def format_position_review(reviews: list[PositionReview]) -> str:

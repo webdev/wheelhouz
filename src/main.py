@@ -259,6 +259,14 @@ def _apply_tv_adjustment(sized: SizedOpportunity, tv_overall: str) -> SizedOppor
 # Local briefing formatter (no Claude API needed)
 # ---------------------------------------------------------------------------
 
+def _format_position_desc(p: PositionReview) -> str:
+    """Format a position review into a readable description like 'GOOG -4x Dec 18 $380 call'."""
+    if not p.option_type:
+        return p.symbol
+    qty_str = f"-{p.quantity}x" if p.quantity > 0 else f"{p.quantity}x"
+    return f"{p.symbol} {qty_str} {p.expiration} ${p.strike} {p.option_type}"
+
+
 def format_local_briefing(
     regime: RegimeState,
     vix: float,
@@ -299,7 +307,10 @@ def format_local_briefing(
         lines.append(f"\n━━ DO NOW ━━")
 
         for p in urgent_positions:
-            lines.append(f"  {p.action}: {p.symbol}")
+            pos_desc = _format_position_desc(p)
+            pnl_str = f"+${p.current_pnl:,.0f}" if p.current_pnl >= 0 else f"-${abs(p.current_pnl):,.0f}"
+            lines.append(f"  {p.action}: {pos_desc}")
+            lines.append(f"    P&L: {pnl_str} ({p.pnl_pct:+.0%}) | {p.days_to_expiry}d left")
             lines.append(f"    {p.reasoning}")
 
         for r in high_trades:
@@ -408,7 +419,10 @@ def format_local_briefing(
         lines.append(f"\n━━ WATCH ━━")
 
         for p in watch_positions:
-            lines.append(f"  {p.action}: {p.symbol} — {p.reasoning}")
+            pos_desc = _format_position_desc(p)
+            pnl_str = f"+${p.current_pnl:,.0f}" if p.current_pnl >= 0 else f"-${abs(p.current_pnl):,.0f}"
+            lines.append(f"  {pos_desc} — {p.action}")
+            lines.append(f"    P&L: {pnl_str} ({p.pnl_pct:+.0%}) | {p.days_to_expiry}d left | {p.reasoning}")
 
         for r in watch_trades:
             sig_names = ", ".join(s.signal_type.value for s in r.signals)

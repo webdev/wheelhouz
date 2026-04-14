@@ -722,3 +722,68 @@ class TestIntegrationPipeline:
         prompt = build_reasoning_prompt([ctx])
         assert "AAPL" in prompt
         assert "TRADINGVIEW: unavailable" in prompt
+
+
+class TestTVConvictionAdjustment:
+    def test_tv_sell_downgrades_conviction(self) -> None:
+        """SELL consensus should downgrade MEDIUM → LOW."""
+        from src.main import _apply_tv_adjustment
+        from src.models.analysis import SizedOpportunity
+
+        sized = SizedOpportunity(
+            symbol="PLTR", trade_type="sell_put", strike=Decimal("125"),
+            expiration=None, premium=Decimal("1.80"), contracts=1,
+            capital_deployed=Decimal("12500"), portfolio_pct=0.012,
+            yield_on_capital=0.014, annualized_yield=0.17,
+            conviction="medium", reasoning="test",
+        )
+        result = _apply_tv_adjustment(sized, "STRONG_SELL")
+        assert result.conviction == "low"
+        assert "downgraded" in result.reasoning
+
+    def test_tv_buy_upgrades_conviction(self) -> None:
+        """BUY consensus should upgrade LOW → MEDIUM."""
+        from src.main import _apply_tv_adjustment
+        from src.models.analysis import SizedOpportunity
+
+        sized = SizedOpportunity(
+            symbol="NVDA", trade_type="sell_put", strike=Decimal("130"),
+            expiration=None, premium=Decimal("3.20"), contracts=2,
+            capital_deployed=Decimal("26000"), portfolio_pct=0.026,
+            yield_on_capital=0.025, annualized_yield=0.30,
+            conviction="low", reasoning="test",
+        )
+        result = _apply_tv_adjustment(sized, "STRONG_BUY")
+        assert result.conviction == "medium"
+        assert "upgraded" in result.reasoning
+
+    def test_tv_sell_downgrades_low_to_skip(self) -> None:
+        """SELL on LOW conviction → SKIP (filtered from action plan)."""
+        from src.main import _apply_tv_adjustment
+        from src.models.analysis import SizedOpportunity
+
+        sized = SizedOpportunity(
+            symbol="CRM", trade_type="sell_put", strike=Decimal("170"),
+            expiration=None, premium=Decimal("2.50"), contracts=1,
+            capital_deployed=Decimal("17000"), portfolio_pct=0.017,
+            yield_on_capital=0.015, annualized_yield=0.18,
+            conviction="low", reasoning="test",
+        )
+        result = _apply_tv_adjustment(sized, "SELL")
+        assert result.conviction == "skip"
+
+    def test_tv_neutral_no_change(self) -> None:
+        """NEUTRAL consensus should not change conviction."""
+        from src.main import _apply_tv_adjustment
+        from src.models.analysis import SizedOpportunity
+
+        sized = SizedOpportunity(
+            symbol="AAPL", trade_type="sell_put", strike=Decimal("200"),
+            expiration=None, premium=Decimal("4.00"), contracts=1,
+            capital_deployed=Decimal("20000"), portfolio_pct=0.02,
+            yield_on_capital=0.02, annualized_yield=0.24,
+            conviction="medium", reasoning="test",
+        )
+        result = _apply_tv_adjustment(sized, "NEUTRAL")
+        assert result.conviction == "medium"
+        assert result.reasoning == "test"

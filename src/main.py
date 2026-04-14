@@ -154,8 +154,14 @@ def build_recommendations(
     all_signals: list[AlphaSignal],
     watchlist_data: list[tuple[str, MarketContext, PriceHistory, OptionsChain, EventCalendar]],
     portfolio: PortfolioState | None = None,
+    intel_contexts: list[IntelligenceContext] | None = None,
 ) -> list[SizedOpportunity]:
     """Run strikes + sizing on every symbol with fired signals.
+
+    TradingView consensus adjusts conviction after sizing:
+    - SELL/STRONG_SELL → downgrade one level (can reach SKIP → filtered out)
+    - BUY/STRONG_BUY → upgrade one level (capped at HIGH)
+    - NEUTRAL → no change
 
     Returns a list of SizedOpportunity sorted by conviction then yield.
     """
@@ -168,6 +174,13 @@ def build_recommendations(
     by_symbol: dict[str, list[AlphaSignal]] = defaultdict(list)
     for s in all_signals:
         by_symbol[s.symbol].append(s)
+
+    # Index TradingView consensus by symbol
+    tv_by_symbol: dict[str, str] = {}
+    if intel_contexts:
+        for ctx in intel_contexts:
+            if ctx.technical_consensus:
+                tv_by_symbol[ctx.symbol] = ctx.technical_consensus.overall
 
     price_data = {sym: (mkt, hist, chain) for sym, mkt, hist, chain, _ in watchlist_data}
     target_exp = date_type.today() + timedelta(days=30)
@@ -190,7 +203,14 @@ def build_recommendations(
             signals=sigs,
             portfolio=portfolio,
         )
-        recommendations.append(sized)
+
+        # TradingView conviction adjustment
+        tv_overall = tv_by_symbol.get(symbol)
+        if tv_overall:
+            sized = _apply_tv_adjustment(sized, tv_overall)
+
+        if sized.conviction != "skip":
+            recommendations.append(sized)
 
     # Sort: high > medium > low, then by annualized yield descending
     conviction_rank = {"high": 0, "medium": 1, "low": 2}
@@ -198,6 +218,36 @@ def build_recommendations(
         key=lambda r: (conviction_rank.get(r.conviction, 9), -r.annualized_yield),
     )
     return recommendations
+
+
+_CONVICTION_LEVELS = ["skip", "low", "medium", "high"]
+
+
+def _apply_tv_adjustment(sized: SizedOpportunity, tv_overall: str) -> SizedOpportunity:
+    """Adjust conviction based on TradingView consensus.
+
+    SELL/STRONG_SELL → downgrade one level. BUY/STRONG_BUY → upgrade one level.
+    TradingView can veto or boost conviction, but never initiates a trade.
+    """
+    current_idx = _CONVICTION_LEVELS.index(sized.conviction) if sized.conviction in _CONVICTION_LEVELS else 1
+    original = sized.conviction
+
+    if tv_overall in ("SELL", "STRONG_SELL"):
+        new_idx = max(0, current_idx - 1)
+    elif tv_overall in ("BUY", "STRONG_BUY"):
+        new_idx = min(len(_CONVICTION_LEVELS) - 1, current_idx + 1)
+    else:
+        return sized
+
+    new_conviction = _CONVICTION_LEVELS[new_idx]
+    if new_conviction == original:
+        return sized
+
+    direction = "downgraded" if new_idx < current_idx else "upgraded"
+    tv_note = f" [TV {tv_overall} → {direction} from {original.upper()} to {new_conviction.upper()}]"
+    sized.conviction = new_conviction
+    sized.reasoning += tv_note
+    return sized
 
 
 # ---------------------------------------------------------------------------
@@ -470,8 +520,8 @@ async def run_analysis_cycle(
         regime_str = f"{regime.regime.upper()} — VIX {vix:.1f}, SPY {spy_change:+.2%}"
         analyst_brief = await generate_analyst_brief(contexts_with_signals, regime_str)
 
-    # 7. Build sized recommendations from signals
-    recommendations = build_recommendations(all_signals, watchlist_data)
+    # 7. Build sized recommendations from signals (TV adjusts conviction)
+    recommendations = build_recommendations(all_signals, watchlist_data, intel_contexts=intel_contexts)
 
     # 8. Risk checks
     router = AccountRouter()

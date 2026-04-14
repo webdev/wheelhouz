@@ -652,3 +652,73 @@ class TestPositionReviewBriefing:
         assert "PLTR" in briefing
         assert "CLOSE NOW" in briefing
         assert "HOLD" in briefing
+
+
+class TestIntegrationPipeline:
+    def test_full_pipeline_with_mock_data(self) -> None:
+        """End-to-end: signals + TV consensus + builder → IntelligenceContext."""
+        from src.analysis.signals import detect_all_signals
+        from src.intelligence.builder import build_intelligence_context
+        from src.delivery.reasoning import build_reasoning_prompt
+        from tests.fixtures.market_data import (
+            make_market_context, make_price_history,
+            make_options_chain, make_event_calendar,
+        )
+        from tests.fixtures.intelligence import make_technical_consensus
+
+        mkt = make_market_context(price_change_1d=-3.5, iv_rank=70)
+        hist = make_price_history(rsi_14=28.0)
+        chain = make_options_chain()
+        cal = make_event_calendar()
+
+        signals = detect_all_signals("NVDA", mkt, hist, chain, cal)
+
+        tv = make_technical_consensus(
+            overall="SELL",
+            moving_averages="STRONG_SELL",
+            buy_count=4, neutral_count=5, sell_count=17,
+        )
+
+        ctx = build_intelligence_context(
+            symbol="NVDA",
+            signals=signals,
+            market=mkt,
+            price_history=hist,
+            chain=chain,
+            calendar=cal,
+            technical_consensus=tv,
+        )
+
+        assert ctx.symbol == "NVDA"
+        assert ctx.quant.signal_count >= 1
+        assert ctx.technical_consensus.overall == "SELL"
+        assert ctx.quant.trend_direction in ("uptrend", "downtrend", "range")
+
+        # Build reasoning prompt
+        prompt = build_reasoning_prompt([ctx])
+        assert "NVDA" in prompt
+        assert "SELL" in prompt
+        assert "QUANT SIGNALS" in prompt
+
+    def test_pipeline_graceful_without_tradingview(self) -> None:
+        """Pipeline works when TradingView is None."""
+        from src.intelligence.builder import build_intelligence_context
+        from src.delivery.reasoning import build_reasoning_prompt
+        from tests.fixtures.market_data import (
+            make_market_context, make_price_history,
+            make_options_chain, make_event_calendar,
+        )
+
+        ctx = build_intelligence_context(
+            symbol="AAPL",
+            signals=[],
+            market=make_market_context(),
+            price_history=make_price_history(),
+            chain=make_options_chain(),
+            calendar=make_event_calendar(),
+            technical_consensus=None,
+        )
+
+        prompt = build_reasoning_prompt([ctx])
+        assert "AAPL" in prompt
+        assert "TRADINGVIEW: unavailable" in prompt

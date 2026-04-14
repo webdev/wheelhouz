@@ -186,6 +186,9 @@ def build_recommendations(
     target_exp = date_type.today() + timedelta(days=30)
 
     recommendations: list[SizedOpportunity] = []
+    sized_symbols: set[str] = set()
+
+    # 1. Signal-driven recommendations (quant signals fired)
     for symbol, sigs in by_symbol.items():
         if symbol not in price_data:
             continue
@@ -211,6 +214,50 @@ def build_recommendations(
 
         if sized.conviction != "skip" and sized.contracts > 0:
             recommendations.append(sized)
+            sized_symbols.add(symbol)
+
+    # 2. TV-driven recommendations (no quant signals, but strong TV + IV)
+    # These are valid wheel candidates on green days when dip signals don't fire.
+    if intel_contexts:
+        for ctx in intel_contexts:
+            if ctx.symbol in sized_symbols or ctx.symbol not in price_data:
+                continue
+            tc = ctx.technical_consensus
+            if not tc or tc.overall not in ("BUY", "STRONG_BUY"):
+                continue
+            if ctx.quant.iv_rank < 30:
+                continue
+
+            _, hist, chain = price_data[ctx.symbol]
+            strikes = find_smart_strikes(ctx.symbol, chain, hist, "sell_put")
+            if not strikes:
+                continue
+
+            # Size at LOW conviction (no quant signals to boost it)
+            from src.models.signals import SignalType
+            tv_signal = AlphaSignal(
+                symbol=ctx.symbol,
+                signal_type=SignalType.IV_RANK_SPIKE,
+                strength=0.5,
+                details=f"TV {tc.overall}, IV rank {ctx.quant.iv_rank:.0f}",
+            )
+            sized = size_position(
+                symbol=ctx.symbol,
+                trade_type="sell_put",
+                strike=strikes[0],
+                expiration=target_exp,
+                signals=[tv_signal],
+                portfolio=portfolio,
+            )
+            # Force LOW conviction — TV alone isn't enough for MEDIUM/HIGH
+            sized.conviction = "low"
+            sized.reasoning = (
+                f"TV {tc.overall} + IV rank {ctx.quant.iv_rank:.0f} "
+                f"(no quant signals — sell on strength, not on dip)"
+            )
+
+            if sized.contracts > 0:
+                recommendations.append(sized)
 
     # Sort: high > medium > low, then by annualized yield descending
     conviction_rank = {"high": 0, "medium": 1, "low": 2}
@@ -345,29 +392,15 @@ def format_local_briefing(
     if recommendations:
         medium_trades = [r for r in recommendations if r.conviction == "medium"]
 
-    # TV-driven opportunities (no quant signals, but strong TV + IV)
-    opportunities: list[tuple[str, float, str, float, float]] = []
-    if intel_contexts:
-        signal_symbols = {r.symbol for r in recommendations} if recommendations else set()
-        tv_scores = {"STRONG_BUY": 3, "BUY": 2}
-        for ctx in intel_contexts:
-            if ctx.symbol in signal_symbols:
-                continue
-            tc = ctx.technical_consensus
-            if not tc or tc.overall not in ("BUY", "STRONG_BUY"):
-                continue
-            iv = ctx.quant.iv_rank
-            if iv < 30:
-                continue
-            score = tv_scores.get(tc.overall, 0) + (iv / 30.0)
-            prem_yield = ctx.options.annualized_yield if ctx.options else 0.0
-            opportunities.append((ctx.symbol, score, tc.overall, iv, prem_yield))
-        opportunities.sort(key=lambda x: -x[1])
+    # Low conviction trades (includes TV-driven with no quant signals)
+    low_trades = []
+    if recommendations:
+        low_trades = [r for r in recommendations if r.conviction == "low"]
 
-    if medium_trades or opportunities:
+    if medium_trades or low_trades:
         lines.append(f"\n━━ CONSIDER ━━")
 
-        for r in medium_trades:
+        for r in medium_trades + low_trades:
             exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
             delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
             tv_str = ""
@@ -376,34 +409,19 @@ def format_local_briefing(
                 if ctx_match and ctx_match.technical_consensus:
                     tv_str = f" | TV {ctx_match.technical_consensus.overall}"
 
-            lines.append(f"   >> {r.symbol} — Sell Cash-Secured Put")
+            lines.append(f"   >> {r.symbol} — Sell ${r.strike} Put exp {exp_str}")
             lines.append(
-                f"      {r.contracts}x ${r.strike} P exp {exp_str} "
-                f"@ ${r.premium} mid"
-            )
-            lines.append(
-                f"      {r.annualized_yield:.0%} ann. yield{delta_str}{tv_str}"
+                f"      {r.contracts}x @ ${r.premium} mid | "
+                f"{r.annualized_yield:.0%} ann.{delta_str}{tv_str}"
             )
             lines.append(
                 f"      Collateral ${r.capital_deployed:,.0f} "
                 f"({r.portfolio_pct:.1%} NLV) | "
                 f"Max profit ${r.premium * r.contracts * 100:,.0f}"
             )
-            sig_names = ", ".join(s.signal_type.value for s in r.signals)
-            lines.append(f"      Why: {sig_names}")
+            lines.append(f"      {r.reasoning}")
 
-        if opportunities:
-            if medium_trades:
-                lines.append("")
-            lines.append("  TV-driven (no quant signals yet — investigate):")
-            for sym, _, tv_rating, iv, ann_y in opportunities:
-                yield_str = f" | {ann_y:.0%} ann." if ann_y > 0 else ""
-                lines.append(f"    {sym}: TV {tv_rating} | IV rank {iv:.0f}{yield_str}")
-
-    # ── WATCH — low conviction + earnings + tax + position holds ──
-    watch_trades = []
-    if recommendations:
-        watch_trades = [r for r in recommendations if r.conviction == "low"]
+    # ── WATCH — position holds + earnings + tax ──
     watch_positions = []
     if position_reviews:
         watch_positions = [p for p in position_reviews
@@ -414,7 +432,7 @@ def format_local_briefing(
             days = (cal.next_earnings - date.today()).days
             upcoming_earnings.append((symbol, cal.next_earnings, days))
 
-    has_watch = watch_trades or watch_positions or upcoming_earnings or tax_alerts
+    has_watch = watch_positions or upcoming_earnings or tax_alerts
     if has_watch:
         lines.append(f"\n━━ WATCH ━━")
 
@@ -423,10 +441,6 @@ def format_local_briefing(
             pnl_str = f"+${p.current_pnl:,.0f}" if p.current_pnl >= 0 else f"-${abs(p.current_pnl):,.0f}"
             lines.append(f"  {pos_desc} — {p.action}")
             lines.append(f"    P&L: {pnl_str} ({p.pnl_pct:+.0%}) | {p.days_to_expiry}d left | {p.reasoning}")
-
-        for r in watch_trades:
-            sig_names = ", ".join(s.signal_type.value for s in r.signals)
-            lines.append(f"  {r.symbol}: {sig_names} — needs more signals")
 
         if upcoming_earnings:
             lines.append("")
@@ -438,8 +452,7 @@ def format_local_briefing(
             lines.append(f"  Tax: {alert}")
 
     # ── Nothing to do ──
-    if not (urgent_positions or high_trades or medium_trades or
-            opportunities or watch_trades):
+    if not (urgent_positions or high_trades or medium_trades or low_trades):
         lines.append(f"\n  No signals fired. Sit tight.")
 
     # ── ANALYST BRIEF — Claude reasoning (when available) ──
@@ -454,14 +467,7 @@ def format_local_briefing(
         covered.update(r.symbol for r in recommendations)
     if position_reviews:
         covered.update(p.symbol for p in position_reviews)
-    if intel_contexts:
-        signal_syms = {r.symbol for r in recommendations} if recommendations else set()
-        for ctx in intel_contexts:
-            if ctx.symbol in signal_syms:
-                continue
-            tc = ctx.technical_consensus
-            if tc and tc.overall in ("BUY", "STRONG_BUY") and ctx.quant.iv_rank >= 30:
-                covered.add(ctx.symbol)  # already in CONSIDER opportunities
+    # TV-driven opportunities are now in recommendations, so they're already covered
 
     # Build skip reasons for uncovered symbols
     tv_by_symbol: dict[str, str] = {}

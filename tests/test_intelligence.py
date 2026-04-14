@@ -412,7 +412,7 @@ class TestBriefingWiring:
             analyst_brief="Test analyst brief content",
         )
 
-        assert "NVDA" in briefing
+        assert "WHEEL COPILOT" in briefing
         assert "ANALYST BRIEF" in briefing
         assert "Test analyst brief content" in briefing
 

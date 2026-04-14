@@ -130,15 +130,33 @@ def fetch_vix_and_spy() -> tuple[float, float]:
 
 def fetch_all_watchlist_data(
     symbols: list[str],
+    etrade_session: object | None = None,
 ) -> list[tuple[str, MarketContext, PriceHistory, OptionsChain, EventCalendar]]:
-    """Fetch real market data for all watchlist symbols via yfinance."""
+    """Fetch real market data for all watchlist symbols.
+
+    Options chains: E*Trade first (real bid/ask/Greeks), yfinance fallback.
+    """
     results = []
     for symbol in symbols:
         log.info("fetching_data", symbol=symbol)
         try:
             mkt = fetch_market_context(symbol)
             hist = fetch_price_history(symbol)
-            chain = fetch_options_chain(symbol)
+
+            # Options chain: E*Trade first (accurate), yfinance fallback
+            chain = OptionsChain(symbol=symbol)
+            if etrade_session:
+                try:
+                    from src.data.broker import fetch_etrade_chain
+                    chain = fetch_etrade_chain(
+                        etrade_session, symbol, float(hist.current_price),
+                    )
+                except Exception as e:
+                    log.warning("etrade_chain_fallback", symbol=symbol, error=str(e))
+
+            if not chain.puts and not chain.calls:
+                chain = fetch_options_chain(symbol)
+
             cal = fetch_event_calendar(symbol)
             results.append((symbol, mkt, hist, chain, cal))
         except Exception as e:
@@ -156,12 +174,11 @@ def build_recommendations(
     portfolio: PortfolioState | None = None,
     intel_contexts: list[IntelligenceContext] | None = None,
 ) -> list[SizedOpportunity]:
-    """Run strikes + sizing on every symbol with fired signals.
+    """Build trade recommendations: puts on dips, calls on strength.
 
-    TradingView consensus adjusts conviction after sizing:
-    - SELL/STRONG_SELL → downgrade one level (can reach SKIP → filtered out)
-    - BUY/STRONG_BUY → upgrade one level (capped at HIGH)
-    - NEUTRAL → no change
+    1. Signal-driven puts: quant dip signals fire → sell puts at support.
+       TradingView consensus adjusts conviction (SELL downgrades, BUY upgrades).
+    2. Covered calls: TV shows strength on owned stock → sell calls at resistance.
 
     Returns a list of SizedOpportunity sorted by conviction then yield.
     """
@@ -171,9 +188,14 @@ def build_recommendations(
     if portfolio is None:
         portfolio = PortfolioState()  # NLV=0 → sizing falls back to $1M
 
-    by_symbol: dict[str, list[AlphaSignal]] = defaultdict(list)
+    # Split signals by direction
+    put_signals: dict[str, list[AlphaSignal]] = defaultdict(list)
+    call_signals: dict[str, list[AlphaSignal]] = defaultdict(list)
     for s in all_signals:
-        by_symbol[s.symbol].append(s)
+        if s.direction == "sell_call":
+            call_signals[s.symbol].append(s)
+        else:
+            put_signals[s.symbol].append(s)
 
     # Index TradingView consensus by symbol
     tv_by_symbol: dict[str, str] = {}
@@ -182,14 +204,26 @@ def build_recommendations(
             if ctx.technical_consensus:
                 tv_by_symbol[ctx.symbol] = ctx.technical_consensus.overall
 
+    # Index owned stock for covered call eligibility (no naked calls)
+    owned_shares: dict[str, int] = {}
+    existing_short_calls: dict[str, int] = {}
+    if portfolio:
+        for pos in portfolio.positions:
+            if pos.position_type == "long_stock" and pos.quantity >= 100:
+                owned_shares[pos.symbol] = owned_shares.get(pos.symbol, 0) + pos.quantity
+            elif pos.position_type == "short_call":
+                existing_short_calls[pos.symbol] = (
+                    existing_short_calls.get(pos.symbol, 0) + pos.quantity
+                )
+
     price_data = {sym: (mkt, hist, chain) for sym, mkt, hist, chain, _ in watchlist_data}
     target_exp = date_type.today() + timedelta(days=30)
 
     recommendations: list[SizedOpportunity] = []
     sized_symbols: set[str] = set()
 
-    # 1. Signal-driven recommendations (quant signals fired)
-    for symbol, sigs in by_symbol.items():
+    # 1. Signal-driven PUT recommendations (quant dip signals fired)
+    for symbol, sigs in put_signals.items():
         if symbol not in price_data:
             continue
         _, hist, chain = price_data[symbol]
@@ -216,51 +250,92 @@ def build_recommendations(
             recommendations.append(sized)
             sized_symbols.add(symbol)
 
-    # 2. TV-driven recommendations (no quant signals, but strong TV + IV)
-    # These are valid wheel candidates on green days when dip signals don't fire.
-    if intel_contexts:
-        for ctx in intel_contexts:
-            if ctx.symbol in sized_symbols or ctx.symbol not in price_data:
-                continue
-            tc = ctx.technical_consensus
-            if not tc or tc.overall not in ("BUY", "STRONG_BUY"):
-                continue
-            if ctx.quant.iv_rank < 30:
+    # 2. Signal-driven CALL recommendations (strength signals on owned stock)
+    # RULE: only covered calls — must own 100+ shares of the underlying.
+    for symbol, sigs in call_signals.items():
+        if symbol not in price_data:
+            continue
+        shares = owned_shares.get(symbol, 0)
+        if shares < 100:
+            continue  # no naked calls
+
+        max_contracts = (shares // 100) - existing_short_calls.get(symbol, 0)
+        if max_contracts <= 0:
+            continue
+
+        _, hist, chain = price_data[symbol]
+        strikes = find_smart_strikes(symbol, chain, hist, "sell_call")
+        if not strikes:
+            continue
+
+        sized = size_position(
+            symbol=symbol,
+            trade_type="sell_call",
+            strike=strikes[0],
+            expiration=target_exp,
+            signals=sigs,
+            portfolio=portfolio,
+        )
+
+        # Cap contracts to what we can cover
+        if sized.contracts > max_contracts:
+            sized.contracts = max_contracts
+            sized.capital_deployed = Decimal("0")  # covered calls don't tie up capital
+            sized.portfolio_pct = 0.0
+
+        # TV conviction adjustment for calls too
+        tv_overall = tv_by_symbol.get(symbol)
+        if tv_overall:
+            sized = _apply_tv_adjustment(sized, tv_overall)
+
+        if sized.conviction != "skip" and sized.contracts > 0:
+            recommendations.append(sized)
+            sized_symbols.add(symbol)
+
+    # 3. TV-only covered call recommendations (no quant signals, but TV shows strength)
+    # Catches cases where no call signal fired but TV says BUY on owned stock.
+    if portfolio and intel_contexts:
+        for symbol, shares in owned_shares.items():
+            if symbol in sized_symbols or symbol not in price_data:
                 continue
 
-            _, hist, chain = price_data[ctx.symbol]
-            strikes = find_smart_strikes(ctx.symbol, chain, hist, "sell_put")
+            max_contracts = (shares // 100) - existing_short_calls.get(symbol, 0)
+            if max_contracts <= 0:
+                continue
+
+            ctx = next((c for c in intel_contexts if c.symbol == symbol), None)
+            if not ctx or not ctx.technical_consensus:
+                continue
+            tc = ctx.technical_consensus
+            if tc.overall not in ("BUY", "STRONG_BUY"):
+                continue
+
+            _, hist, chain = price_data[symbol]
+            strikes = find_smart_strikes(symbol, chain, hist, "sell_call")
             if not strikes:
                 continue
 
-            # Size at LOW conviction (no quant signals to boost it)
-            from src.models.enums import SignalType
-            from datetime import datetime as dt_type
-            tv_signal = AlphaSignal(
-                symbol=ctx.symbol,
-                signal_type=SignalType.IV_RANK_SPIKE,
-                strength=0.5,
-                direction="sell_put",
-                reasoning=f"TV {tc.overall}, IV rank {ctx.quant.iv_rank:.0f}",
-                expires=dt_type.now() + timedelta(hours=24),
-            )
-            sized = size_position(
-                symbol=ctx.symbol,
-                trade_type="sell_put",
-                strike=strikes[0],
+            best = strikes[0]
+            recommendations.append(SizedOpportunity(
+                symbol=symbol,
+                trade_type="sell_call",
+                strike=best.strike,
                 expiration=target_exp,
-                signals=[tv_signal],
-                portfolio=portfolio,
-            )
-            # Force LOW conviction — TV alone isn't enough for MEDIUM/HIGH
-            sized.conviction = "low"
-            sized.reasoning = (
-                f"TV {tc.overall} + IV rank {ctx.quant.iv_rank:.0f} "
-                f"(no quant signals — sell on strength, not on dip)"
-            )
-
-            if sized.contracts > 0:
-                recommendations.append(sized)
+                premium=best.premium,
+                contracts=max_contracts,
+                capital_deployed=Decimal("0"),
+                portfolio_pct=0.0,
+                yield_on_capital=best.yield_on_capital,
+                annualized_yield=best.annualized_yield,
+                conviction="low",
+                signals=[],
+                smart_strike=best,
+                reasoning=(
+                    f"TV {tc.overall} — sell calls into strength. "
+                    f"{max_contracts}x ${best.strike}C on {shares} shares."
+                ),
+            ))
+            sized_symbols.add(symbol)
 
     # Sort: high > medium > low, then by annualized yield descending
     conviction_rank = {"high": 0, "medium": 1, "low": 2}
@@ -308,6 +383,13 @@ def _apply_tv_adjustment(sized: SizedOpportunity, tv_overall: str) -> SizedOppor
 # ---------------------------------------------------------------------------
 # Local briefing formatter (no Claude API needed)
 # ---------------------------------------------------------------------------
+
+def _format_stress_value(value: Decimal) -> str:
+    """Format a stress test value: negative = still profitable, positive = real loss."""
+    if value <= 0:
+        return f"safe (keep ${abs(value):,.0f})"
+    return f"${value:,.0f} loss"
+
 
 def _format_position_desc(p: PositionReview) -> str:
     """Format a position review into a readable description like 'GOOG -4x Dec 18 $380 call'."""
@@ -362,6 +444,27 @@ def format_local_briefing(
             lines.append(f"  {p.action}: {pos_desc}")
             lines.append(f"    P&L: {pnl_str} ({p.pnl_pct:+.0%}) | {p.days_to_expiry}d left")
             lines.append(f"    {p.reasoning}")
+            if p.roll:
+                r = p.roll
+                opt_letter = "C" if p.option_type == "call" else "P"
+                credit_str = f"${r.net_credit:,.2f} credit" if r.net_credit >= 0 else f"${abs(r.net_credit):,.2f} debit"
+                total_str = f"+${r.total_net:,.0f}" if r.total_net >= 0 else f"-${abs(r.total_net):,.0f}"
+                lines.append(f"    ROLL: Buy back ${p.strike} {opt_letter} @ ${r.close_price:.2f} → "
+                             f"Sell ${r.new_strike} {opt_letter} exp {r.new_expiration} @ ${r.new_premium:.2f}")
+                lines.append(f"          Net {credit_str}/contract ({total_str} total) [{r.roll_type}]")
+                # Risk metrics
+                if r.risk:
+                    rk = r.risk
+                    lines.append(f"          Delta {rk.delta:.2f} | IV {rk.iv:.0%} | "
+                                 f"Collateral ${rk.collateral:,.0f}")
+                    if rk.loss_at_10pct_drop > 0 or rk.loss_at_20pct_drop > 0:
+                        s10 = _format_stress_value(rk.loss_at_10pct_drop)
+                        s20 = _format_stress_value(rk.loss_at_20pct_drop)
+                        lines.append(f"          Stress: 10% drop → {s10} | "
+                                     f"20% drop → {s20} | "
+                                     f"R/R {rk.risk_reward:.1f}:1")
+                    for w in rk.warnings:
+                        lines.append(f"          !! {w}")
 
         for r in high_trades:
             exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
@@ -372,21 +475,30 @@ def format_local_briefing(
                 if ctx_match and ctx_match.technical_consensus:
                     tv_str = f" | TV {ctx_match.technical_consensus.overall}"
 
-            lines.append(f"  >>> {r.symbol} — Sell Cash-Secured Put")
+            is_call = r.trade_type == "sell_call"
+            trade_label = "Sell Covered Call" if is_call else "Sell Cash-Secured Put"
+            opt_letter = "C" if is_call else "P"
+            lines.append(f"  >>> {r.symbol} — {trade_label}")
             lines.append(
-                f"      {r.contracts}x ${r.strike} P exp {exp_str} "
+                f"      {r.contracts}x ${r.strike} {opt_letter} exp {exp_str} "
                 f"@ ${r.premium} mid"
             )
             lines.append(
                 f"      {r.annualized_yield:.0%} ann. yield{delta_str}{tv_str}"
             )
-            lines.append(
-                f"      Collateral ${r.capital_deployed:,.0f} "
-                f"({r.portfolio_pct:.1%} NLV) | "
-                f"Max profit ${r.premium * r.contracts * 100:,.0f}"
-            )
+            if is_call:
+                lines.append(
+                    f"      Max profit ${r.premium * r.contracts * 100:,.0f}"
+                )
+            else:
+                lines.append(
+                    f"      Collateral ${r.capital_deployed:,.0f} "
+                    f"({r.portfolio_pct:.1%} NLV) | "
+                    f"Max profit ${r.premium * r.contracts * 100:,.0f}"
+                )
             sig_names = ", ".join(s.signal_type.value for s in r.signals)
-            lines.append(f"      Why: {sig_names}")
+            if sig_names:
+                lines.append(f"      Why: {sig_names}")
             if r.smart_strike and r.smart_strike.technical_reason:
                 lines.append(f"      Strike at {r.smart_strike.technical_reason}")
 
@@ -412,16 +524,23 @@ def format_local_briefing(
                 if ctx_match and ctx_match.technical_consensus:
                     tv_str = f" | TV {ctx_match.technical_consensus.overall}"
 
-            lines.append(f"   >> {r.symbol} — Sell ${r.strike} Put exp {exp_str}")
+            is_call = r.trade_type == "sell_call"
+            opt_type = "Call" if is_call else "Put"
+            lines.append(f"   >> {r.symbol} — Sell ${r.strike} {opt_type} exp {exp_str}")
             lines.append(
                 f"      {r.contracts}x @ ${r.premium} mid | "
                 f"{r.annualized_yield:.0%} ann.{delta_str}{tv_str}"
             )
-            lines.append(
-                f"      Collateral ${r.capital_deployed:,.0f} "
-                f"({r.portfolio_pct:.1%} NLV) | "
-                f"Max profit ${r.premium * r.contracts * 100:,.0f}"
-            )
+            if is_call:
+                lines.append(
+                    f"      Max profit ${r.premium * r.contracts * 100:,.0f}"
+                )
+            else:
+                lines.append(
+                    f"      Collateral ${r.capital_deployed:,.0f} "
+                    f"({r.portfolio_pct:.1%} NLV) | "
+                    f"Max profit ${r.premium * r.contracts * 100:,.0f}"
+                )
             lines.append(f"      {r.reasoning}")
 
     # ── WATCH — position holds + earnings + tax ──
@@ -444,6 +563,29 @@ def format_local_briefing(
             pnl_str = f"+${p.current_pnl:,.0f}" if p.current_pnl >= 0 else f"-${abs(p.current_pnl):,.0f}"
             lines.append(f"  {pos_desc} — {p.action}")
             lines.append(f"    P&L: {pnl_str} ({p.pnl_pct:+.0%}) | {p.days_to_expiry}d left | {p.reasoning}")
+            if p.roll:
+                r = p.roll
+                opt_letter = "C" if p.option_type == "call" else "P"
+                credit_str = f"${r.net_credit:,.2f} credit" if r.net_credit >= 0 else f"${abs(r.net_credit):,.2f} debit"
+                total_str = f"+${r.total_net:,.0f}" if r.total_net >= 0 else f"-${abs(r.total_net):,.0f}"
+                lines.append(f"    ROLL: Buy back ${p.strike} {opt_letter} @ ${r.close_price:.2f} → "
+                             f"Sell ${r.new_strike} {opt_letter} exp {r.new_expiration} @ ${r.new_premium:.2f}")
+                lines.append(f"          Net {credit_str}/contract ({total_str} total) [{r.roll_type}]")
+                if r.risk:
+                    rk = r.risk
+                    if p.option_type == "put":
+                        lines.append(f"          Delta {rk.delta:.2f} | IV {rk.iv:.0%} | "
+                                     f"Collateral ${rk.collateral:,.0f}")
+                    else:
+                        lines.append(f"          Delta {rk.delta:.2f} | IV {rk.iv:.0%}")
+                    if rk.loss_at_10pct_drop > 0 or rk.loss_at_20pct_drop > 0:
+                        s10 = _format_stress_value(rk.loss_at_10pct_drop)
+                        s20 = _format_stress_value(rk.loss_at_20pct_drop)
+                        lines.append(f"          Stress: 10% drop → {s10} | "
+                                     f"20% drop → {s20} | "
+                                     f"R/R {rk.risk_reward:.1f}:1")
+                    for w in rk.warnings:
+                        lines.append(f"          !! {w}")
 
         if upcoming_earnings:
             lines.append("")
@@ -520,11 +662,21 @@ async def run_analysis_cycle(
     cycle_name: str,
     always_push: bool = False,
 ) -> dict[str, Any]:
-    """Run a single analysis cycle with live yfinance data.
+    """Run a single analysis cycle.
 
     Pipeline: data -> signals -> regime -> risk -> briefing.
+    Uses E*Trade for options chains (real bid/ask) when session is available.
     """
     log.info("analysis_cycle_start", cycle=cycle_name)
+
+    # 0. Try to get E*Trade session for live chain data
+    etrade_session = None
+    try:
+        from src.data.auth import get_session
+        etrade_session = get_session()
+        log.info("etrade_session_available")
+    except Exception:
+        log.info("etrade_session_unavailable_using_yfinance")
 
     # 1. Macro data
     vix, spy_change = fetch_vix_and_spy()
@@ -537,7 +689,7 @@ async def run_analysis_cycle(
     # 3. Fetch per-symbol data
     symbols = load_watchlist()
     log.info("fetching_watchlist", symbols=len(symbols))
-    watchlist_data = fetch_all_watchlist_data(symbols)
+    watchlist_data = fetch_all_watchlist_data(symbols, etrade_session=etrade_session)
     log.info("watchlist_fetched", symbols_ok=len(watchlist_data))
 
     # 4. Signal detection on every symbol
@@ -572,6 +724,7 @@ async def run_analysis_cycle(
         intel_contexts.append(ctx)
 
     # 5b. Load portfolio and run position review
+    chain_by_symbol = {sym: chain for sym, _, _, chain, _ in watchlist_data}
     portfolio_state = None
     position_reviews = []
     try:
@@ -586,7 +739,8 @@ async def run_analysis_cycle(
                     (c for c in intel_contexts if c.symbol == pos.symbol), None
                 )
                 if matching_ctx:
-                    review = review_position(pos, matching_ctx)
+                    chain = chain_by_symbol.get(pos.symbol)
+                    review = review_position(pos, matching_ctx, chain=chain)
                     position_reviews.append(review)
     except Exception as e:
         log.warning("portfolio_load_skipped", error=str(e))

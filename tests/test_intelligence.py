@@ -2,7 +2,7 @@
 """Tests for intelligence mesh models."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from src.models.intelligence import (
@@ -557,10 +557,10 @@ class TestPositionReview:
         pos = Position(
             symbol="NVDA", position_type="short_put", quantity=2,
             strike=Decimal("130"), expiration=date(2026, 5, 15),
-            entry_price=Decimal("3.20"), current_price=Decimal("1.50"),
+            entry_price=Decimal("3.20"), current_price=Decimal("2.00"),
             underlying_price=Decimal("145"), cost_basis=Decimal("26000"),
             delta=-0.15, theta=0.05, gamma=0.01, vega=0.06, iv=0.40,
-            days_to_expiry=32, unrealized_pnl=Decimal("340"),
+            days_to_expiry=32, unrealized_pnl=Decimal("240"),
         )
         ctx = make_intelligence_context(
             symbol="NVDA",
@@ -572,7 +572,7 @@ class TestPositionReview:
         assert result.action == "HOLD"
 
     def test_take_profit_when_most_of_premium_captured(self) -> None:
-        """Should recommend TAKE PROFIT when >75% of premium captured."""
+        """Should recommend TAKE PROFIT when >50% of premium captured."""
         from src.intelligence.position_review import review_position
         from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
         from src.models.position import Position
@@ -592,6 +592,79 @@ class TestPositionReview:
 
         result = review_position(pos, ctx)
         assert result.action == "TAKE PROFIT"
+
+    def test_deep_otm_no_take_profit_at_56pct(self) -> None:
+        """Deep OTM (delta < 0.10) should NOT take profit at 56% — let it ride."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        # Mirrors the GOOG $270 put scenario: 18% OTM, 56% captured
+        pos = Position(
+            symbol="GOOG", position_type="short_put", quantity=1,
+            strike=Decimal("270"), expiration=date(2026, 10, 16),
+            entry_price=Decimal("2.00"), current_price=Decimal("0.88"),
+            underlying_price=Decimal("330"), cost_basis=Decimal("27000"),
+            delta=-0.05, theta=0.01, gamma=0.002, vega=0.02, iv=0.25,
+            days_to_expiry=185, unrealized_pnl=Decimal("112"),
+        )
+        ctx = make_intelligence_context(
+            symbol="GOOG",
+            quant=make_quant_intelligence(trend_direction="uptrend"),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "HOLD", (
+            f"Deep OTM put at 56% captured should HOLD, not {result.action}"
+        )
+
+    def test_deep_otm_takes_profit_at_80pct(self) -> None:
+        """Deep OTM (delta < 0.10) SHOULD take profit once 80%+ captured."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="GOOG", position_type="short_put", quantity=1,
+            strike=Decimal("270"), expiration=date(2026, 10, 16),
+            entry_price=Decimal("2.00"), current_price=Decimal("0.35"),
+            underlying_price=Decimal("330"), cost_basis=Decimal("27000"),
+            delta=-0.03, theta=0.005, gamma=0.001, vega=0.01, iv=0.20,
+            days_to_expiry=185, unrealized_pnl=Decimal("165"),
+        )
+        ctx = make_intelligence_context(
+            symbol="GOOG",
+            quant=make_quant_intelligence(trend_direction="uptrend"),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "TAKE PROFIT", (
+            f"Deep OTM at 82% captured should TAKE PROFIT, not {result.action}"
+        )
+
+    def test_near_atm_takes_profit_early(self) -> None:
+        """Near ATM (delta > 0.25) should take profit at 40% — real risk."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="META", position_type="short_put", quantity=1,
+            strike=Decimal("580"), expiration=date(2026, 5, 15),
+            entry_price=Decimal("8.00"), current_price=Decimal("4.70"),
+            underlying_price=Decimal("585"), cost_basis=Decimal("58000"),
+            delta=-0.35, theta=0.06, gamma=0.015, vega=0.12, iv=0.50,
+            days_to_expiry=32, unrealized_pnl=Decimal("330"),
+        )
+        ctx = make_intelligence_context(
+            symbol="META",
+            quant=make_quant_intelligence(trend_direction="range"),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "TAKE PROFIT", (
+            f"Near ATM at 41% captured should TAKE PROFIT, not {result.action}"
+        )
 
     def test_watch_closely_when_tv_flips(self) -> None:
         """Should recommend WATCH CLOSELY when TradingView flips bearish."""
@@ -730,6 +803,161 @@ class TestIntegrationPipeline:
         assert "TRADINGVIEW: unavailable" in prompt
 
 
+class TestCallSignals:
+    """Signal-driven covered call detection."""
+
+    def test_overbought_rsi_fires(self) -> None:
+        """RSI > 70 should fire overbought signal with sell_call direction."""
+        from src.analysis.signals import detect_overbought_rsi
+        from tests.fixtures.market_data import make_price_history
+
+        hist = make_price_history(rsi_14=75.0)
+        result = detect_overbought_rsi("AAPL", hist)
+
+        assert result is not None
+        assert result.direction == "sell_call"
+        assert result.signal_type.value == "overbought_rsi"
+        assert "overbought" in result.reasoning.lower()
+
+    def test_overbought_rsi_silent_when_normal(self) -> None:
+        """RSI at 55 should not fire."""
+        from src.analysis.signals import detect_overbought_rsi
+        from tests.fixtures.market_data import make_price_history
+
+        hist = make_price_history(rsi_14=55.0)
+        assert detect_overbought_rsi("AAPL", hist) is None
+
+    def test_resistance_test_fires_near_52w_high(self) -> None:
+        """Price within 3% of 52-week high should fire resistance signal."""
+        from src.analysis.signals import detect_resistance_test
+        from tests.fixtures.market_data import make_market_context, make_price_history
+
+        # Price $970, 52w high $995 → 2.5% below → should fire
+        mkt = make_market_context(price=Decimal("970.00"))
+        hist = make_price_history(current_price=Decimal("970.00"), high_52w=Decimal("995.00"))
+        result = detect_resistance_test("NVDA", mkt, hist)
+
+        assert result is not None
+        assert result.direction == "sell_call"
+        assert "52w high" in result.reasoning
+
+    def test_resistance_test_silent_when_far(self) -> None:
+        """Price 15% below 52w high with no nearby SMA resistance should not fire."""
+        from src.analysis.signals import detect_resistance_test
+        from tests.fixtures.market_data import make_market_context, make_price_history
+
+        # All SMAs below price, 52w high far away
+        mkt = make_market_context(price=Decimal("850.00"))
+        hist = make_price_history(
+            current_price=Decimal("850.00"), high_52w=Decimal("995.00"),
+            sma_200=Decimal("820.00"), sma_50=Decimal("840.00"),
+        )
+        assert detect_resistance_test("NVDA", mkt, hist) is None
+
+    def test_multi_day_rally_fires(self) -> None:
+        """3+ green days with 5%+ rally should fire."""
+        from src.analysis.signals import detect_multi_day_rally
+        from tests.fixtures.market_data import make_price_history
+
+        # Build closes that show a clear 3-day rally from a recent low
+        closes = [Decimal("100"), Decimal("98"), Decimal("95"),  # dip
+                  Decimal("98"), Decimal("101"), Decimal("104")]  # 3 green days, ~9.5% from low
+        hist = make_price_history(
+            current_price=Decimal("104"),
+            daily_closes=closes,
+        )
+        result = detect_multi_day_rally("AAPL", hist)
+
+        assert result is not None
+        assert result.direction == "sell_call"
+        assert "green days" in result.reasoning
+
+    def test_multi_day_rally_silent_on_flat(self) -> None:
+        """Flat price action should not fire."""
+        from src.analysis.signals import detect_multi_day_rally
+        from tests.fixtures.market_data import make_price_history
+
+        closes = [Decimal("100"), Decimal("100.5"), Decimal("100.2"),
+                  Decimal("100.3"), Decimal("100.1")]
+        hist = make_price_history(current_price=Decimal("100.1"), daily_closes=closes)
+        assert detect_multi_day_rally("AAPL", hist) is None
+
+    def test_volume_climax_up_fires(self) -> None:
+        """3x+ volume on an up day should fire."""
+        from src.analysis.signals import detect_volume_climax_up
+        from tests.fixtures.market_data import make_market_context, make_price_history
+
+        mkt = make_market_context(price_change_1d=3.5)  # up day
+        vols = [50_000_000.0] * 19 + [200_000_000.0]  # last day is 4x average
+        hist = make_price_history(daily_volumes=vols)
+        result = detect_volume_climax_up("NVDA", mkt, hist)
+
+        assert result is not None
+        assert result.direction == "sell_call"
+        assert "exhaustion" in result.reasoning.lower()
+
+    def test_volume_climax_up_silent_on_down_day(self) -> None:
+        """High volume on a down day should NOT fire (that's a put signal)."""
+        from src.analysis.signals import detect_volume_climax_up
+        from tests.fixtures.market_data import make_market_context, make_price_history
+
+        mkt = make_market_context(price_change_1d=-3.5)  # down day
+        vols = [50_000_000.0] * 19 + [200_000_000.0]
+        hist = make_price_history(daily_volumes=vols)
+        assert detect_volume_climax_up("NVDA", mkt, hist) is None
+
+    def test_call_signals_in_detect_all(self) -> None:
+        """detect_all_signals should include call signals when conditions are met."""
+        from src.analysis.signals import detect_all_signals
+        from tests.fixtures.market_data import (
+            make_market_context, make_price_history,
+            make_options_chain, make_event_calendar,
+        )
+
+        # RSI 75 should fire overbought_rsi
+        mkt = make_market_context(price_change_1d=1.0)
+        hist = make_price_history(rsi_14=75.0)
+        chain = make_options_chain()
+        cal = make_event_calendar()
+
+        signals = detect_all_signals("AAPL", mkt, hist, chain, cal)
+        call_signals = [s for s in signals if s.direction == "sell_call"]
+        assert len(call_signals) >= 1
+        assert any(s.signal_type.value == "overbought_rsi" for s in call_signals)
+
+    def test_call_signals_only_recommend_on_owned_stock(self) -> None:
+        """build_recommendations should skip call signals when stock is not owned."""
+        from src.main import build_recommendations
+        from tests.fixtures.market_data import (
+            make_market_context, make_price_history,
+            make_options_chain, make_event_calendar,
+        )
+        from src.models.signals import AlphaSignal
+        from src.models.enums import SignalType
+        from src.models.position import PortfolioState
+
+        call_signal = AlphaSignal(
+            symbol="AAPL",
+            signal_type=SignalType.OVERBOUGHT_RSI,
+            strength=70.0,
+            direction="sell_call",
+            reasoning="test",
+            expires=datetime.utcnow() + timedelta(hours=24),
+        )
+
+        mkt = make_market_context(symbol="AAPL", price=Decimal("200.00"))
+        hist = make_price_history(symbol="AAPL", current_price=Decimal("200.00"))
+        chain = make_options_chain(symbol="AAPL")
+        cal = make_event_calendar(symbol="AAPL")
+        watchlist_data = [("AAPL", mkt, hist, chain, cal)]
+
+        # No positions = no owned stock = no call recs
+        portfolio = PortfolioState()
+        recs = build_recommendations([call_signal], watchlist_data, portfolio=portfolio)
+        call_recs = [r for r in recs if r.trade_type == "sell_call"]
+        assert len(call_recs) == 0
+
+
 class TestTVConvictionAdjustment:
     def test_tv_strong_sell_forces_skip(self) -> None:
         """STRONG_SELL always forces SKIP regardless of starting conviction."""
@@ -809,3 +1037,224 @@ class TestTVConvictionAdjustment:
         result = _apply_tv_adjustment(sized, "NEUTRAL")
         assert result.conviction == "medium"
         assert result.reasoning == "test"
+
+
+class TestRollDirection:
+    """Roll recommendations should never increase risk direction."""
+
+    def test_put_roll_never_goes_up(self) -> None:
+        """A put at $270 should never roll UP to $300 — that's closer to ATM."""
+        from src.intelligence.position_review import _build_roll
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from tests.fixtures.market_data import make_event_calendar
+        from src.models.market import OptionsChain, OptionContract
+        from src.models.position import Position
+
+        # GOOG at $400, short $270 put, chain has $300 put as "best delta"
+        # but $300 > $270 → should be blocked
+        pos = Position(
+            symbol="GOOG", position_type="short_put", quantity=1,
+            strike=Decimal("270"), expiration=date(2026, 10, 16),
+            entry_price=Decimal("20.00"), current_price=Decimal("8.81"),
+            underlying_price=Decimal("400"), cost_basis=Decimal("27000"),
+            delta=-0.04, theta=0.02, gamma=0.001, vega=0.03, iv=0.35,
+            days_to_expiry=185,
+        )
+        # Chain only has puts at $300+ (above current $270 strike)
+        chain = OptionsChain(
+            symbol="GOOG",
+            puts=[
+                OptionContract(strike=Decimal("300"), expiration=date(2026, 5, 29),
+                               option_type="put",
+                               bid=Decimal("3.00"), ask=Decimal("4.00"), mid=Decimal("3.50"),
+                               delta=-0.17, implied_vol=0.39, volume=50, open_interest=200),
+                OptionContract(strike=Decimal("320"), expiration=date(2026, 5, 29),
+                               option_type="put",
+                               bid=Decimal("5.50"), ask=Decimal("6.50"), mid=Decimal("6.00"),
+                               delta=-0.22, implied_vol=0.40, volume=30, open_interest=150),
+            ],
+            calls=[],
+        )
+        ctx = make_intelligence_context(
+            symbol="GOOG",
+            quant=make_quant_intelligence(iv_rank=74.0),
+            events=make_event_calendar(symbol="GOOG", next_earnings=date(2026, 4, 29)),
+        )
+
+        result = _build_roll(pos, ctx, chain)
+        # All chain puts are above $270 → should return None (no roll)
+        assert result is None
+
+    def test_put_roll_allows_same_or_lower_strike(self) -> None:
+        """A put at $230 can roll DOWN to $220 (lower strike = safer)."""
+        from src.intelligence.position_review import _build_roll
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from tests.fixtures.market_data import make_market_context
+        from src.models.market import OptionsChain, OptionContract
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="AMZN", position_type="short_put", quantity=1,
+            strike=Decimal("230"), expiration=date(2026, 5, 29),
+            entry_price=Decimal("5.60"), current_price=Decimal("3.00"),
+            underlying_price=Decimal("249"), cost_basis=Decimal("23000"),
+            delta=-0.18, theta=0.04, gamma=0.003, vega=0.05, iv=0.42,
+            days_to_expiry=45,
+        )
+        chain = OptionsChain(
+            symbol="AMZN",
+            puts=[
+                OptionContract(strike=Decimal("220"), expiration=date(2026, 6, 30),
+                               option_type="put",
+                               bid=Decimal("4.00"), ask=Decimal("5.00"), mid=Decimal("4.50"),
+                               delta=-0.15, implied_vol=0.45, volume=100, open_interest=300),
+                OptionContract(strike=Decimal("210"), expiration=date(2026, 6, 30),
+                               option_type="put",
+                               bid=Decimal("2.50"), ask=Decimal("3.50"), mid=Decimal("3.00"),
+                               delta=-0.10, implied_vol=0.44, volume=80, open_interest=250),
+            ],
+            calls=[],
+        )
+        ctx = make_intelligence_context(
+            symbol="AMZN",
+            quant=make_quant_intelligence(iv_rank=65.0),
+            market=make_market_context(symbol="AMZN", price=Decimal("249")),
+        )
+
+        result = _build_roll(pos, ctx, chain)
+        # $220 and $210 are both below $230 → should find a roll
+        assert result is not None
+        assert result.new_strike <= pos.strike
+        assert result.roll_type == "down_and_out"
+
+    def test_call_roll_never_goes_down(self) -> None:
+        """A call at $295 should never roll DOWN to $280 — that's closer to ATM."""
+        from src.intelligence.position_review import _build_roll
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.market import OptionsChain, OptionContract
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="AMZN", position_type="short_call", quantity=1,
+            strike=Decimal("295"), expiration=date(2026, 12, 18),
+            entry_price=Decimal("15.50"), current_price=Decimal("15.62"),
+            underlying_price=Decimal("249"), cost_basis=Decimal("0"),
+            delta=0.15, theta=-0.03, gamma=0.002, vega=0.10, iv=0.42,
+            days_to_expiry=248, option_type="call",
+        )
+        # Chain only has calls below $295
+        chain = OptionsChain(
+            symbol="AMZN",
+            puts=[],
+            calls=[
+                OptionContract(strike=Decimal("280"), expiration=date(2026, 5, 30),
+                               option_type="call",
+                               bid=Decimal("2.80"), ask=Decimal("3.20"), mid=Decimal("3.01"),
+                               delta=0.19, implied_vol=0.42, volume=40, open_interest=100),
+                OptionContract(strike=Decimal("270"), expiration=date(2026, 5, 30),
+                               option_type="call",
+                               bid=Decimal("4.50"), ask=Decimal("5.00"), mid=Decimal("4.75"),
+                               delta=0.25, implied_vol=0.43, volume=30, open_interest=80),
+            ],
+        )
+        ctx = make_intelligence_context(
+            symbol="AMZN",
+            quant=make_quant_intelligence(iv_rank=45.0),
+        )
+
+        result = _build_roll(pos, ctx, chain)
+        assert result is None
+
+    def test_put_roll_blocked_when_debit_exceeds_premium(self) -> None:
+        """A roll where the debit exceeds the new premium should be blocked."""
+        from src.intelligence.position_review import _build_roll
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.market import OptionsChain, OptionContract
+        from src.models.position import Position
+
+        # Buy back at $5.44, new premium $2.65 → net debit $2.79 > new premium $2.65
+        pos = Position(
+            symbol="AMZN", position_type="short_put", quantity=1,
+            strike=Decimal("230"), expiration=date(2026, 5, 29),
+            entry_price=Decimal("5.60"), current_price=Decimal("5.44"),
+            underlying_price=Decimal("249"), cost_basis=Decimal("23000"),
+            delta=-0.22, theta=0.04, gamma=0.003, vega=0.05, iv=0.45,
+            days_to_expiry=45,
+        )
+        chain = OptionsChain(
+            symbol="AMZN",
+            puts=[
+                OptionContract(strike=Decimal("220"), expiration=date(2026, 5, 30),
+                               option_type="put",
+                               bid=Decimal("2.40"), ask=Decimal("2.90"), mid=Decimal("2.65"),
+                               delta=-0.15, implied_vol=0.45, volume=100, open_interest=300),
+            ],
+            calls=[],
+        )
+        ctx = make_intelligence_context(
+            symbol="AMZN",
+            quant=make_quant_intelligence(iv_rank=65.0),
+        )
+
+        result = _build_roll(pos, ctx, chain)
+        # Debit ($2.79) > new premium ($2.65) → blocked
+        assert result is None
+
+
+class TestDeepOTMEarningsAdvice:
+    """Deep OTM positions with small losses shouldn't get panic advice."""
+
+    def test_deep_otm_call_no_panic_on_small_loss(self) -> None:
+        """A deep OTM call with tiny loss shouldn't say 'close to limit loss'."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from tests.fixtures.market_data import make_event_calendar
+        from src.models.position import Position
+
+        # AMZN $295 call: stock at $249, delta ~0.05, only -1% loss
+        pos = Position(
+            symbol="AMZN", position_type="short_call", quantity=1,
+            strike=Decimal("295"), expiration=date(2026, 12, 18),
+            entry_price=Decimal("15.50"), current_price=Decimal("15.65"),
+            underlying_price=Decimal("249"), cost_basis=Decimal("0"),
+            delta=0.05, theta=-0.02, gamma=0.001, vega=0.08, iv=0.42,
+            days_to_expiry=248, option_type="call",
+        )
+        ctx = make_intelligence_context(
+            symbol="AMZN",
+            quant=make_quant_intelligence(trend_direction="range"),
+            events=make_event_calendar(symbol="AMZN", next_earnings=date(2026, 4, 30)),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "WATCH CLOSELY"
+        # Should NOT say "close before report to limit loss"
+        assert "close before report to limit loss" not in result.reasoning.lower()
+        # Should say something about being deep OTM / unlikely to be threatened
+        assert "deep otm" in result.reasoning.lower() or "unlikely" in result.reasoning.lower()
+
+    def test_near_atm_underwater_gets_close_advice(self) -> None:
+        """A near-ATM underwater position SHOULD get 'close to limit loss' advice."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from tests.fixtures.market_data import make_event_calendar
+        from src.models.position import Position
+
+        # Near ATM put, delta 0.35, -15% loss
+        pos = Position(
+            symbol="META", position_type="short_put", quantity=1,
+            strike=Decimal("500"), expiration=date(2026, 12, 18),
+            entry_price=Decimal("20.00"), current_price=Decimal("23.00"),
+            underlying_price=Decimal("510"), cost_basis=Decimal("50000"),
+            delta=-0.35, theta=0.04, gamma=0.005, vega=0.10, iv=0.45,
+            days_to_expiry=248, option_type="put",
+        )
+        ctx = make_intelligence_context(
+            symbol="META",
+            quant=make_quant_intelligence(trend_direction="range"),
+            events=make_event_calendar(symbol="META", next_earnings=date(2026, 4, 30)),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "WATCH CLOSELY"
+        assert "close before report to limit loss" in result.reasoning.lower()

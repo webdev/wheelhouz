@@ -24,6 +24,12 @@ class SignalType(Enum):
     VOLUME_CLIMAX = "volume_climax"
     GAP_FILL = "gap_fill"
 
+    # Call signals (selling covered calls on strength)
+    OVERBOUGHT_RSI = "overbought_rsi"
+    RESISTANCE_TEST = "resistance_test"
+    MULTI_DAY_RALLY = "multi_day_rally"
+    VOLUME_CLIMAX_UP = "volume_climax_up"
+
     # Flow / sentiment
     UNUSUAL_PUT_SELLING = "unusual_put_selling"
     DARK_POOL_ACCUMULATION = "dark_pool"

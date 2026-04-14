@@ -76,6 +76,17 @@ class PriceHistory:
                 break
         return count
 
+    def consecutive_green_days(self) -> int:
+        """Count consecutive up days from the most recent close."""
+        count = 0
+        closes = self.daily_closes
+        for i in range(len(closes) - 1, 0, -1):
+            if closes[i] > closes[i - 1]:
+                count += 1
+            else:
+                break
+        return count
+
     def drawdown_from_n_day_high(self, n: int) -> float:
         """Percent drawdown from the highest close in the last n days."""
         recent = self.daily_closes[-n:]
@@ -85,6 +96,16 @@ class PriceHistory:
         if peak == 0:
             return 0.0
         return float((peak - self.current_price) / peak * 100)
+
+    def rally_from_n_day_low(self, n: int) -> float:
+        """Percent rally from the lowest close in the last n days."""
+        recent = self.daily_closes[-n:]
+        if not recent:
+            return 0.0
+        trough = min(recent)
+        if trough == 0:
+            return 0.0
+        return float((self.current_price - trough) / trough * 100)
 
 
 @dataclass

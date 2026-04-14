@@ -396,6 +396,134 @@ def detect_gap_fill(
     return None
 
 
+# ── 14. Overbought RSI (Call Signal) ────────────────────────────
+
+
+def detect_overbought_rsi(
+    symbol: str,
+    hist: PriceHistory,
+) -> AlphaSignal | None:
+    """RSI(14) above 70 — stock extended, sell calls into strength."""
+    params = _params()
+    threshold = float(params.get("overbought_rsi_threshold", 70))  # type: ignore[arg-type]
+
+    if hist.rsi_14 is None or hist.rsi_14 <= threshold:
+        return None
+
+    strength = min(100.0, (hist.rsi_14 - threshold) * 5 + 50)
+    return AlphaSignal(
+        symbol=symbol,
+        signal_type=SignalType.OVERBOUGHT_RSI,
+        strength=strength,
+        direction="sell_call",
+        reasoning=f"{symbol} RSI(14) at {hist.rsi_14:.1f} — overbought. "
+                  f"Sell covered calls into strength.",
+        expires=_now() + timedelta(hours=72),
+    )
+
+
+# ── 15. Resistance Test (Call Signal) ──────────────────────────
+
+
+def detect_resistance_test(
+    symbol: str,
+    mkt: MarketContext,
+    hist: PriceHistory,
+) -> AlphaSignal | None:
+    """Price within 3% of major resistance (52w high, SMA above price)."""
+    params = _params()
+    proximity = float(params.get("resistance_proximity_pct", 3.0))  # type: ignore[arg-type]
+
+    price = float(mkt.price)
+    resistance_levels: dict[str, Decimal | None] = {
+        "52w high": hist.high_52w if hist.high_52w > 0 else None,
+        "200 SMA": hist.sma_200 if hist.sma_200 and hist.sma_200 > hist.current_price else None,
+        "50 SMA": hist.sma_50 if hist.sma_50 and hist.sma_50 > hist.current_price else None,
+    }
+
+    for level_name, level_price in resistance_levels.items():
+        if level_price is None or level_price == 0:
+            continue
+        lp = float(level_price)
+        pct_below = (lp - price) / lp * 100
+        if 0 < pct_below < proximity:
+            return AlphaSignal(
+                symbol=symbol,
+                signal_type=SignalType.RESISTANCE_TEST,
+                strength=65.0,
+                direction="sell_call",
+                reasoning=f"{symbol} at ${price:.2f}, within {pct_below:.1f}% of "
+                          f"{level_name} (${lp:.2f}). Sell calls at/above resistance.",
+                expires=_now() + timedelta(hours=48),
+            )
+    return None
+
+
+# ── 16. Multi-Day Rally (Call Signal) ──────────────────────────
+
+
+def detect_multi_day_rally(
+    symbol: str,
+    hist: PriceHistory,
+) -> AlphaSignal | None:
+    """3+ consecutive green days, stock up 5%+ from recent low."""
+    params = _params()
+    min_days = int(params.get("multi_day_rally_days", 3))  # type: ignore[call-overload]
+    min_pct = float(params.get("multi_day_rally_pct", 5.0))  # type: ignore[arg-type]
+
+    green_days = hist.consecutive_green_days()
+    rally = hist.rally_from_n_day_low(5)
+
+    if green_days < min_days or rally < min_pct:
+        return None
+
+    strength = min(100.0, rally * 10 + green_days * 5)
+    return AlphaSignal(
+        symbol=symbol,
+        signal_type=SignalType.MULTI_DAY_RALLY,
+        strength=strength,
+        direction="sell_call",
+        reasoning=f"{symbol}: {green_days} green days, up {rally:.1f}% "
+                  f"from 5-day low. Sell covered calls into the rally.",
+        expires=_now() + timedelta(hours=48),
+    )
+
+
+# ── 17. Volume Climax Up (Call Signal) ─────────────────────────
+
+
+def detect_volume_climax_up(
+    symbol: str,
+    mkt: MarketContext,
+    hist: PriceHistory,
+) -> AlphaSignal | None:
+    """Volume > 3x 20-day average on an UP day — exhaustion buying."""
+    if not hist.daily_volumes or len(hist.daily_volumes) < 20:
+        return None
+    if mkt.price_change_1d <= 0:
+        return None  # only on up days
+
+    avg_20d = sum(hist.daily_volumes[-20:]) / 20
+    if avg_20d == 0:
+        return None
+
+    latest_vol = hist.daily_volumes[-1]
+    vol_ratio = latest_vol / avg_20d
+
+    if vol_ratio < 3.0:
+        return None
+
+    return AlphaSignal(
+        symbol=symbol,
+        signal_type=SignalType.VOLUME_CLIMAX_UP,
+        strength=min(100.0, vol_ratio * 15),
+        direction="sell_call",
+        reasoning=f"{symbol} volume {vol_ratio:.1f}x average on an up day. "
+                  f"Exhaustion buying — sell covered calls.",
+        expires=_now() + timedelta(hours=48),
+    )
+
+
 # ── 13. Dark Pool (deprioritized) ────────────────────────────────
 
 
@@ -421,6 +549,7 @@ def detect_all_signals(
 ) -> list[AlphaSignal]:
     """Run all 13 signal detectors and return those that fired."""
     results: list[AlphaSignal | None] = [
+        # Put signals (sell puts on dips/weakness)
         detect_intraday_dip(symbol, mkt),
         detect_multi_day_pullback(symbol, hist),
         detect_iv_rank_spike(symbol, mkt),
@@ -434,5 +563,10 @@ def detect_all_signals(
         detect_volume_climax(symbol, mkt, hist),
         detect_gap_fill(symbol, hist),
         detect_dark_pool(symbol, mkt),
+        # Call signals (sell covered calls on strength)
+        detect_overbought_rsi(symbol, hist),
+        detect_resistance_test(symbol, mkt, hist),
+        detect_multi_day_rally(symbol, hist),
+        detect_volume_climax_up(symbol, mkt, hist),
     ]
     return [s for s in results if s is not None]

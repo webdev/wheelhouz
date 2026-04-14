@@ -1,21 +1,60 @@
+# src/intelligence/position_review.py
 """Position review — evaluate open positions for hold/watch/close.
 
 The same intelligence that decides entries continuously re-evaluates
 open positions. If the system wouldn't recommend opening the trade
 today, it tells you to consider closing it.
+
+Roll recommendations are Greek-aware: they pick strikes based on delta
+targets, stress-test for 10%/20% drops, and flag high-risk situations.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
 import structlog
 
 from src.models.intelligence import IntelligenceContext
+from src.models.market import OptionsChain
 from src.models.position import Position
 
 logger = structlog.get_logger()
+
+# Risk parameters for roll strike selection
+_PUT_DELTA_TARGET = 0.22       # sweet spot for wheel puts
+_PUT_DELTA_MAX = 0.30          # never roll to delta above this
+_PUT_DELTA_HIGH_IV_TARGET = 0.16  # go further OTM when IV is elevated
+_PUT_DELTA_HIGH_IV_MAX = 0.22
+_HIGH_IV_THRESHOLD = 60        # IV rank above this = high IV environment
+_MAX_RISK_REWARD = 3.0         # block rolls where 10% drop loss > 3x premium
+
+
+@dataclass
+class RollRisk:
+    """Risk metrics for a proposed roll."""
+    delta: float               # delta of the new position
+    gamma: float               # gamma — how fast delta changes
+    iv: float                  # implied volatility of the new strike
+    loss_at_10pct_drop: Decimal  # dollar loss if stock drops 10% (per contract)
+    loss_at_20pct_drop: Decimal  # dollar loss if stock drops 20% (per contract)
+    risk_reward: float         # loss_at_10pct_drop / premium (lower = better)
+    collateral: Decimal        # capital tied up (strike × 100)
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RollRecommendation:
+    """A specific roll suggestion: close current, open new."""
+    close_price: Decimal          # per-contract cost to buy back
+    new_strike: Decimal           # strike for the new position
+    new_expiration: str           # formatted date (e.g. "May 14")
+    new_premium: Decimal          # per-contract premium for new position
+    net_credit: Decimal           # per-contract: new_premium - close_price
+    total_net: Decimal            # all contracts: net_credit * quantity * 100
+    roll_type: str                # "out", "down_and_out", "up_and_out"
+    risk: RollRisk | None = None  # Greek-aware risk assessment
 
 
 @dataclass
@@ -35,12 +74,16 @@ class PositionReview:
     entry_price: Decimal = Decimal("0")
     current_price: Decimal = Decimal("0")
     pnl_pct: float = 0.0       # % of premium captured (positive = profit)
+    roll: RollRecommendation | None = None
 
 
-def _make_review(position: Position, action: str, reasoning: str, pnl: Decimal, pnl_pct: float) -> PositionReview:
+def _make_review(
+    position: Position, action: str, reasoning: str,
+    pnl: Decimal, pnl_pct: float,
+    roll: RollRecommendation | None = None,
+) -> PositionReview:
     """Build a PositionReview with full position details."""
     exp_str = position.expiration.strftime("%b %d") if position.expiration else ""
-    # Options are 100 shares per contract
     multiplier = 100 if position.option_type else 1
     return PositionReview(
         symbol=position.symbol,
@@ -56,15 +99,307 @@ def _make_review(position: Position, action: str, reasoning: str, pnl: Decimal, 
         entry_price=position.entry_price,
         current_price=position.current_price,
         pnl_pct=pnl_pct,
+        roll=roll,
     )
 
 
-def review_position(position: Position, context: IntelligenceContext) -> PositionReview:
+def _stress_test_put(
+    strike: float, premium: float, current_price: float,
+) -> tuple[Decimal, Decimal]:
+    """Calculate loss at 10% and 20% stock drops for a short put.
+
+    Returns (loss_at_10pct, loss_at_20pct) per contract.
+    Positive = loss, negative = still profitable.
+    """
+    results = []
+    for drop_pct in (0.10, 0.20):
+        new_price = current_price * (1 - drop_pct)
+        if new_price < strike:
+            # ITM: lose intrinsic value minus premium collected
+            intrinsic_loss = strike - new_price
+            net_loss = intrinsic_loss - premium
+        else:
+            # Still OTM: keep all premium
+            net_loss = -premium
+        results.append(Decimal(str(round(net_loss * 100, 0))))  # per contract
+
+    return results[0], results[1]
+
+
+def _build_roll(
+    position: Position,
+    context: IntelligenceContext,
+    chain: OptionsChain | None = None,
+) -> RollRecommendation | None:
+    """Build a risk-managed roll recommendation.
+
+    Uses the full options chain (when available) to pick a strike
+    based on target delta, IV environment, and stress test outcomes.
+    Falls back to IntelligenceContext.options.best_strike when no chain.
+    """
+    from datetime import timedelta
+
+    close_price = position.current_price
+    if close_price <= 0:
+        return None
+
+    iv_rank = context.quant.iv_rank
+    current_price = float(context.market.price) if context.market else 0.0
+    if current_price <= 0:
+        return None
+
+    # Earnings check: if earnings fall within the default 30-day window,
+    # push the roll target to AFTER the earnings report instead of blocking.
+    earnings_date = context.events.next_earnings if context.events else None
+    new_exp_date = date.today() + timedelta(days=30)
+    earnings_in_window = (
+        earnings_date is not None
+        and earnings_date <= new_exp_date
+    )
+    if earnings_in_window:
+        # Target 30 days AFTER earnings — roll past the report
+        new_exp_date = earnings_date + timedelta(days=30)
+
+    if position.position_type == "short_put":
+        # Never roll a put to a higher strike — that's closer to ATM,
+        # more assignment risk. Only roll down (lower strike) or same strike out.
+        contract = _pick_put_roll_target(
+            chain, current_price, iv_rank,
+            max_strike=float(position.strike),
+        )
+
+        if contract:
+            new_strike = contract.strike
+            new_premium = contract.mid
+            delta = contract.delta
+            gamma = 0.0
+            iv = contract.implied_vol
+        else:
+            # No viable put roll at or below current strike
+            return None
+
+        if new_premium <= 0:
+            return None
+
+        # Economics gate: if net debit > new premium, you're paying more
+        # to roll than you'll collect — just close instead
+        net = new_premium - close_price
+        if net < 0 and abs(net) > new_premium:
+            logger.info("roll_blocked", symbol=position.symbol,
+                        reason="debit_exceeds_premium",
+                        debit=str(abs(net)), new_premium=str(new_premium))
+            return None
+
+        # Stress test
+        loss_10, loss_20 = _stress_test_put(
+            float(new_strike), float(new_premium), current_price,
+        )
+        premium_per_contract = float(new_premium) * 100
+        risk_reward = float(loss_10) / premium_per_contract if premium_per_contract > 0 else 99.0
+
+        # Build warnings
+        warnings: list[str] = []
+        if abs(delta) > _PUT_DELTA_MAX:
+            warnings.append(f"HIGH DELTA ({delta:.2f}) — close to the money")
+        if iv_rank > _HIGH_IV_THRESHOLD:
+            warnings.append(f"HIGH IV (rank {iv_rank:.0f}) — stock pricing big moves")
+        if earnings_in_window:
+            days_to_earnings = (earnings_date - date.today()).days
+            warnings.append(f"EARNINGS in {days_to_earnings}d — rolling to post-earnings exp")
+        if risk_reward > _MAX_RISK_REWARD:
+            warnings.append(f"RISK/REWARD {risk_reward:.1f}:1 — 10% drop wipes out {risk_reward:.0f}x premium")
+        if float(new_strike) * 100 > 50000:
+            warnings.append(f"LARGE COLLATERAL ${float(new_strike) * 100:,.0f}")
+
+        # Block roll if risk/reward is unacceptable
+        if risk_reward > _MAX_RISK_REWARD:
+            logger.info("roll_blocked", symbol=position.symbol,
+                        reason="risk_reward", risk_reward=round(risk_reward, 1))
+            return None
+
+        # Roll type
+        if new_strike < position.strike:
+            roll_type = "down_and_out"
+        elif new_strike > position.strike:
+            roll_type = "up_and_out"
+        else:
+            roll_type = "out"
+
+        collateral = Decimal(str(float(new_strike) * 100))
+
+    elif position.position_type == "short_call":
+        # For calls, pick from the call chain — must be at or above current strike
+        contract = _pick_call_roll_target(
+            chain, current_price, iv_rank,
+            min_strike=float(position.strike),
+        )
+
+        if contract:
+            new_strike = contract.strike
+            new_premium = contract.mid
+            delta = contract.delta
+            iv = contract.implied_vol
+        else:
+            # No viable call roll at or above current strike
+            return None
+
+        if new_premium <= 0:
+            return None
+
+        # Economics gate: if net debit > new premium, you're paying more
+        # to roll than you'll collect — just close instead
+        net = new_premium - close_price
+        if net < 0 and abs(net) > new_premium:
+            logger.info("roll_blocked", symbol=position.symbol,
+                        reason="debit_exceeds_premium",
+                        debit=str(abs(net)), new_premium=str(new_premium))
+            return None
+
+        warnings = []
+        if abs(delta) > 0.35:
+            warnings.append(f"HIGH DELTA ({delta:.2f}) — close to the money")
+        if earnings_in_window:
+            days_to_earnings = (earnings_date - date.today()).days
+            warnings.append(f"EARNINGS in {days_to_earnings}d — rolling to post-earnings exp")
+
+        premium_per_contract = float(new_premium) * 100
+        # For calls on owned stock, "loss" is opportunity cost, not real loss
+        loss_10 = Decimal("0")
+        loss_20 = Decimal("0")
+        risk_reward = 0.0
+        collateral = Decimal("0")
+
+        if new_strike > position.strike:
+            roll_type = "up_and_out"
+        else:
+            roll_type = "out"
+    else:
+        return None
+
+    net_credit = new_premium - close_price
+    total_net = net_credit * 100 * position.quantity
+
+    risk = RollRisk(
+        delta=delta,
+        gamma=gamma if position.position_type == "short_put" else 0.0,
+        iv=iv,
+        loss_at_10pct_drop=loss_10,
+        loss_at_20pct_drop=loss_20,
+        risk_reward=risk_reward,
+        collateral=collateral,
+        warnings=warnings,
+    )
+
+    return RollRecommendation(
+        close_price=close_price,
+        new_strike=new_strike,
+        new_expiration=new_exp_date.strftime("%b %d"),
+        new_premium=new_premium,
+        net_credit=net_credit,
+        total_net=total_net,
+        roll_type=roll_type,
+        risk=risk,
+    )
+
+
+def _pick_put_roll_target(
+    chain: OptionsChain | None, current_price: float, iv_rank: float,
+    max_strike: float = float("inf"),
+) -> object | None:
+    """Pick the best OTM put for a roll based on delta and IV environment.
+
+    Never rolls up — max_strike ensures the new strike is at or below
+    the current position's strike. Rolling a put to a higher strike
+    increases assignment risk.
+
+    High IV → go further OTM (lower delta) to reduce assignment risk.
+    Normal IV → target the wheel sweet spot (0.20-0.25 delta).
+    """
+    if not chain or not chain.puts:
+        return None
+
+    # Delta targets based on IV environment
+    if iv_rank > _HIGH_IV_THRESHOLD:
+        target_delta = _PUT_DELTA_HIGH_IV_TARGET
+        max_delta = _PUT_DELTA_HIGH_IV_MAX
+    else:
+        target_delta = _PUT_DELTA_TARGET
+        max_delta = _PUT_DELTA_MAX
+
+    # Filter: OTM puts with real bids, acceptable delta, at or below current strike
+    candidates = [
+        p for p in chain.puts
+        if float(p.strike) < current_price
+        and float(p.strike) <= max_strike
+        and p.bid > 0
+        and 0.05 <= abs(p.delta) <= max_delta
+    ]
+
+    if not candidates:
+        # Relax delta filter but keep OTM + has bid + at or below current strike
+        candidates = [
+            p for p in chain.puts
+            if float(p.strike) < current_price
+            and float(p.strike) <= max_strike
+            and p.bid > 0
+        ]
+
+    if not candidates:
+        return None
+
+    # Pick nearest to target delta
+    return min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
+
+
+def _pick_call_roll_target(
+    chain: OptionsChain | None, current_price: float, iv_rank: float,
+    min_strike: float = 0.0,
+) -> object | None:
+    """Pick the best OTM call for a covered call roll.
+
+    Never rolls down — min_strike ensures the new strike is at or above
+    the current position's strike. Rolling a call to a lower strike
+    increases assignment risk and costs a big debit.
+    """
+    if not chain or not chain.calls:
+        return None
+
+    target_delta = 0.25 if iv_rank <= _HIGH_IV_THRESHOLD else 0.18
+    max_delta = 0.35
+
+    candidates = [
+        c for c in chain.calls
+        if float(c.strike) > current_price
+        and float(c.strike) >= min_strike
+        and c.bid > 0
+        and 0.05 <= abs(c.delta) <= max_delta
+    ]
+
+    if not candidates:
+        # Relax delta filter but keep OTM + above current strike
+        candidates = [
+            c for c in chain.calls
+            if float(c.strike) > current_price
+            and float(c.strike) >= min_strike
+            and c.bid > 0
+        ]
+
+    if not candidates:
+        return None
+
+    return min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
+
+
+def review_position(
+    position: Position,
+    context: IntelligenceContext,
+    chain: OptionsChain | None = None,
+) -> PositionReview:
     """Review a single open position against current intelligence.
 
     Priority order:
     1. CLOSE NOW — loss stop hit, earnings imminent + short-dated
-    2. TAKE PROFIT — captured >75% of premium
+    2. TAKE PROFIT — captured >50% of premium
     3. WATCH CLOSELY — something changed (TV flipped, trend weakening, earnings upcoming)
     4. HOLD — thesis intact, everything healthy
     """
@@ -78,6 +413,9 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
         pnl = position.current_price - position.entry_price
     pnl_pct = float(pnl / position.entry_price) if position.entry_price > 0 else 0.0
 
+    # Build roll recommendation upfront (used by multiple actions)
+    roll = _build_roll(position, context, chain) if is_short else None
+
     # 1. CLOSE NOW checks
     # Loss stop (short options only): close if option price rises to 2x (monthlies)
     # or 1.5x (weeklies) what you sold it for
@@ -89,7 +427,7 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
             reason = (f"Loss stop hit: now ${position.current_price} vs "
                       f"${position.entry_price} entry ({loss_multiple:.1f}x) — "
                       f"buy back for ${loss_dollars:,.0f} loss")
-            return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
+            return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct, roll=roll)
 
     # Earnings conflict — only flag if earnings falls BEFORE the position's
     # expiration. A put expiring May 1 doesn't care about May 5 earnings.
@@ -102,38 +440,122 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
     if earnings_before_expiry and position.days_to_expiry <= 30:
         days_to_earnings = (earnings_date - date.today()).days
         reason = f"Earnings in {days_to_earnings}d, position expires after — close or roll before report"
-        return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct)
+        return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct, roll=roll)
 
-    # 2. TAKE PROFIT — captured >75% of premium (short options only)
-    if is_short and pnl_pct >= 0.75:
+    # 2. TAKE PROFIT — buy back short options to capture profit and redeploy
+    # Scale threshold by moneyness: deep OTM positions have near-zero
+    # assignment risk, so let them ride longer to capture more premium.
+    # Near ATM positions have real risk — take profit sooner.
+    pos_delta = abs(position.delta)
+    if pos_delta < 0.10:
+        take_profit_threshold = 0.80  # deep OTM — let it ride
+    elif pos_delta > 0.25:
+        take_profit_threshold = 0.40  # near ATM — take profit early
+    else:
+        take_profit_threshold = 0.50  # moderate OTM — standard
+
+    if is_short and pnl_pct >= take_profit_threshold:
         profit_dollars = pnl * 100 * position.quantity
-        reason = f"Captured {pnl_pct:.0%} of premium (${profit_dollars:,.0f} profit) — buy back for ${position.current_price}"
-        return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct)
+        close_cost = position.current_price * 100 * position.quantity
+        if pnl_pct >= 0.75:
+            reason = (f"Captured {pnl_pct:.0%} of premium (${profit_dollars:,.0f} profit) — "
+                      f"buy to close for ${close_cost:,.0f}, almost free money left on table")
+        else:
+            reason = (f"Captured {pnl_pct:.0%} of premium (${profit_dollars:,.0f} profit) — "
+                      f"buy to close for ${close_cost:,.0f} and sell next month's cycle")
+        return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct, roll=roll)
 
-    # 3. WATCH CLOSELY checks
+    # 2b. Time-based close: under 14 DTE, gamma risk rises, diminishing returns
+    if is_short and position.days_to_expiry <= 14 and pnl_pct >= 0.30:
+        profit_dollars = pnl * 100 * position.quantity
+        close_cost = position.current_price * 100 * position.quantity
+        reason = (f"Only {position.days_to_expiry}d left with {pnl_pct:.0%} captured "
+                  f"(${profit_dollars:,.0f} profit) — gamma risk rising, "
+                  f"buy to close for ${close_cost:,.0f} and roll to next month")
+        return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct, roll=roll)
+
+    # 3. WATCH CLOSELY checks — every reason must say WHAT TO DO
     watch_reasons: list[str] = []
 
-    # Earnings within window but long-dated — note it, don't panic
+    # Earnings within window but long-dated
     if earnings_before_expiry and position.days_to_expiry > 30:
         days_to_earnings = (earnings_date - date.today()).days
-        watch_reasons.append(f"Earnings in {days_to_earnings}d — monitor around report")
+        # Prescriptive advice depends on moneyness and P&L
+        if pos_delta < 0.10 and pnl_pct >= 0.40:
+            watch_reasons.append(
+                f"Earnings in {days_to_earnings}d. Deep OTM with {pnl_pct:.0%} captured — "
+                f"safe to hold through report unless gap risk concerns you. "
+                f"Close before if you want to lock in profit")
+        elif pnl_pct >= 0.30:
+            watch_reasons.append(
+                f"Earnings in {days_to_earnings}d with {pnl_pct:.0%} captured. "
+                f"Consider closing before report to lock profit, then re-sell after IV crush")
+        elif pnl_pct < 0:
+            if pos_delta < 0.10 and pnl_pct > -0.10:
+                # Deep OTM with small loss — earnings unlikely to threaten
+                watch_reasons.append(
+                    f"Earnings in {days_to_earnings}d. Position is deep OTM "
+                    f"(delta {pos_delta:.2f}) — unlikely to be threatened by report. "
+                    f"Hold unless earnings surprise dramatically")
+            else:
+                watch_reasons.append(
+                    f"Earnings in {days_to_earnings}d and position is underwater ({pnl_pct:.0%}). "
+                    f"Close before report to limit loss, or roll to post-earnings expiration")
+        else:
+            # Calculate the 5% trigger level
+            trigger_pct = 0.05
+            if position.position_type == "short_put":
+                trigger_price = float(position.strike) * (1 + trigger_pct)
+                direction = "drops to"
+                action = "buy to close the put"
+                risk = (f"At-the-money puts through earnings can lose "
+                        f"${float(position.strike) * 0.10 * 100:,.0f}+ on a 10% gap down")
+            else:
+                trigger_price = float(position.strike) * (1 - trigger_pct)
+                direction = "rallies to"
+                action = "buy to close the call"
+                risk = (f"At-the-money calls through earnings risk assignment "
+                        f"if stock gaps above ${position.strike}")
+            watch_reasons.append(
+                f"Earnings in {days_to_earnings}d. "
+                f"Set alert at ${trigger_price:,.0f} — "
+                f"if stock {direction} that level, {action} immediately. "
+                f"{risk}")
 
     # TradingView flipped strongly bearish
     tc = context.technical_consensus
     if tc and tc.overall in ("SELL", "STRONG_SELL"):
-        watch_reasons.append(f"TV {tc.overall}")
+        if position.position_type == "short_put":
+            watch_reasons.append(
+                f"TV {tc.overall} — crowd is bearish. "
+                f"Tighten your stop or close if price breaks below ${position.strike}")
+        elif position.position_type == "short_call":
+            watch_reasons.append(
+                f"TV {tc.overall} — bearish momentum favors your short call. "
+                f"Hold unless stock reverses sharply")
+        else:
+            watch_reasons.append(f"TV {tc.overall}")
 
     # Trend is downtrend for a short put position
     if (context.quant.trend_direction == "downtrend"
             and position.position_type == "short_put"):
-        watch_reasons.append("Price in confirmed downtrend")
+        if position.days_to_expiry <= 21:
+            watch_reasons.append(
+                f"Downtrend with only {position.days_to_expiry}d left — "
+                f"close or roll out if stock breaks ${position.strike}")
+        else:
+            watch_reasons.append(
+                f"Price in confirmed downtrend. "
+                f"Watch ${position.strike} strike — roll down if threatened")
 
     # IV dropped significantly (premium likely cheap now)
     if context.quant.iv_rank < 30 and context.quant.iv_rank > 0:
-        watch_reasons.append(f"IV rank dropped to {context.quant.iv_rank:.0f}")
+        watch_reasons.append(
+            f"IV rank {context.quant.iv_rank:.0f} — premium dried up. "
+            f"Not worth opening new positions here, but existing ones can ride")
 
     if watch_reasons:
-        return _make_review(position, "WATCH CLOSELY", ". ".join(watch_reasons), pnl, pnl_pct)
+        return _make_review(position, "WATCH CLOSELY", ". ".join(watch_reasons), pnl, pnl_pct, roll=roll)
 
     # 4. HOLD — everything healthy
     hold_reasons = ["Thesis intact"]
@@ -141,7 +563,7 @@ def review_position(position: Position, context: IntelligenceContext) -> Positio
         hold_reasons.append(f"TV {tc.overall}")
     hold_reasons.append(f"Trend: {context.quant.trend_direction}")
 
-    return _make_review(position, "HOLD", ". ".join(hold_reasons), pnl, pnl_pct)
+    return _make_review(position, "HOLD", ". ".join(hold_reasons), pnl, pnl_pct, roll=roll)
 
 
 def format_position_review(reviews: list[PositionReview]) -> str:

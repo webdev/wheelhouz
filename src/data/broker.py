@@ -7,7 +7,7 @@ Rate-limited: 0.3s between requests (4 req/s market, 2 req/s account).
 from __future__ import annotations
 
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -251,33 +251,39 @@ def fetch_quotes(
 def fetch_option_chain(
     session: ETradeSession,
     symbol: str,
-    expiry_year: str,
-    expiry_month: int,
+    expiry_date: date,
     strike_near: float,
     num_strikes: int = 10,
 ) -> list[dict[str, Any]]:
-    """Pull option chain with Greeks from E*Trade."""
+    """Pull option chain with Greeks from E*Trade.
+
+    expiry_date: exact expiration date (get from get_option_expire_date first).
+    """
     _sleep()
     try:
         chain = session.market.get_option_chains(
             symbol,
-            expiry_year=expiry_year,
-            expiry_month=expiry_month,
-            strike_price_near=strike_near,
+            expiry_date=expiry_date,
+            strike_price_near=int(strike_near),
             no_of_strikes=num_strikes,
             option_category="STANDARD",
             chain_type="CALLPUT",
-            price_type="AALL",
+            price_type="all",
+            resp_format="json",
         )
-    except Exception:
-        logger.warning("etrade_chain_failed", symbol=symbol)
+    except Exception as e:
+        logger.warning("etrade_chain_failed", symbol=symbol, error=str(e))
         return []
 
     contracts: list[dict[str, Any]] = []
     if not chain or "OptionChainResponse" not in chain:
         return contracts
 
-    for pair in chain["OptionChainResponse"]["OptionPair"]:
+    option_pairs = chain["OptionChainResponse"].get("OptionPair", [])
+    if isinstance(option_pairs, dict):
+        option_pairs = [option_pairs]
+
+    for pair in option_pairs:
         for side in ("Call", "Put"):
             opt = pair.get(side)
             if not opt:
@@ -303,3 +309,100 @@ def fetch_option_chain(
 
     logger.info("chain_fetched", symbol=symbol, contracts=len(contracts))
     return contracts
+
+
+def fetch_etrade_chain(
+    session: ETradeSession,
+    symbol: str,
+    current_price: float,
+    target_dte: int = 30,
+) -> OptionsChain:
+    """Fetch full options chain from E*Trade with real bid/ask/Greeks.
+
+    Returns an OptionsChain model (same as yfinance returns) so it's
+    a drop-in replacement. Falls back to empty chain on any failure.
+    """
+    from src.models.market import OptionContract
+
+    # 1. Get available expiration dates
+    _sleep()
+    try:
+        exp_resp = session.market.get_option_expire_date(symbol)
+    except Exception:
+        logger.warning("etrade_expirations_failed", symbol=symbol)
+        return OptionsChain(symbol=symbol)
+
+    if not exp_resp or "OptionExpireDateResponse" not in exp_resp:
+        return OptionsChain(symbol=symbol)
+
+    raw_exps = exp_resp["OptionExpireDateResponse"].get("ExpirationDate", [])
+    if isinstance(raw_exps, dict):
+        raw_exps = [raw_exps]
+
+    exp_dates: list[date] = []
+    for exp in raw_exps:
+        d = _parse_date(exp.get("year"), exp.get("month"), exp.get("day"))
+        if d:
+            exp_dates.append(d)
+
+    if not exp_dates:
+        return OptionsChain(symbol=symbol)
+
+    # Pick the expiration closest to target DTE
+    today = date.today()
+    target_date = today + timedelta(days=target_dte)
+    best_exp = min(exp_dates, key=lambda d: abs((d - target_date).days))
+
+    # 2. Fetch the chain for that expiration
+    raw_contracts = fetch_option_chain(
+        session=session,
+        symbol=symbol,
+        expiry_date=best_exp,
+        strike_near=current_price,
+        num_strikes=20,
+    )
+
+    if not raw_contracts:
+        return OptionsChain(symbol=symbol, expirations=exp_dates)
+
+    # 3. Convert to OptionContract models
+    puts: list[OptionContract] = []
+    calls: list[OptionContract] = []
+
+    for c in raw_contracts:
+        bid = c["bid"]
+        ask = c["ask"]
+        mid = (bid + ask) / 2
+
+        contract = OptionContract(
+            strike=c["strike"],
+            expiration=best_exp,
+            option_type=c["option_type"].lower(),
+            bid=bid,
+            ask=ask,
+            mid=Decimal(str(round(float(mid), 2))),
+            volume=c["volume"],
+            open_interest=c["open_interest"],
+            implied_vol=c["iv"],
+            delta=c["delta"],
+        )
+
+        if c["option_type"] == "PUT":
+            puts.append(contract)
+        else:
+            calls.append(contract)
+
+    # ATM IV from nearest-ATM put
+    atm_iv = None
+    if puts:
+        atm_put = min(puts, key=lambda p: abs(float(p.strike) - current_price))
+        atm_iv = atm_put.implied_vol
+
+    logger.info("etrade_chain_built", symbol=symbol, puts=len(puts), calls=len(calls))
+    return OptionsChain(
+        symbol=symbol,
+        puts=puts,
+        calls=calls,
+        atm_iv=atm_iv,
+        expirations=exp_dates,
+    )

@@ -1,5 +1,6 @@
-# Core wheel candidates (stocks you'd want to own)
+# Core wheel candidates + current holdings
 watchlist:
+  # Original watchlist
   - AAPL
   - AMZN
   - AVGO
@@ -15,4 +16,16 @@ watchlist:
   - NFLX
   - UBER
   - COIN
-  # Add/remove based on your conviction list
+  # Current holdings not in original watchlist
+  - IWM
+  - LLY
+  - LMND
+  - MU
+  - ONDS
+  - SMH
+  - SOFI
+  - SPY
+  - TSLA
+  - VOO
+  - VRT
+  - WDC

@@ -1,20 +1,27 @@
 """Portfolio loading — convert broker positions to shared Position model.
 
-Loads positions from Alpaca (paper) or E*Trade (live), converts to
-the shared Position model, and builds PortfolioState.
+Loads positions from:
+1. YAML file (manual snapshot — bridge until E*Trade API)
+2. Alpaca (paper trading)
+3. E*Trade (live — TODO)
 """
 from __future__ import annotations
 
+import os
 import re
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 
 import structlog
+import yaml
 
 from src.execution.alpaca_client import AlpacaPaperClient, AlpacaPosition
 from src.models.position import PortfolioState, Position
 
 logger = structlog.get_logger()
+
+PORTFOLIO_YAML = Path(__file__).parent.parent.parent / "config" / "portfolio.yaml"
 
 
 def alpaca_position_to_position(ap: AlpacaPosition) -> Position:
@@ -49,8 +56,82 @@ def alpaca_position_to_position(ap: AlpacaPosition) -> Position:
     )
 
 
+def load_portfolio_from_yaml(path: Path | None = None) -> PortfolioState:
+    """Load portfolio from manual YAML snapshot.
+
+    Bridge solution until E*Trade API is wired. Reads config/portfolio.yaml
+    and returns Position objects for all options positions.
+    Stock positions are used for NLV estimation and concentration.
+    """
+    yaml_path = path or PORTFOLIO_YAML
+    if not yaml_path.exists():
+        logger.info("no_portfolio_yaml")
+        return PortfolioState()
+
+    with open(yaml_path) as f:
+        data = yaml.safe_load(f)
+
+    if not data:
+        return PortfolioState()
+
+    positions: list[Position] = []
+
+    # Options positions — these get position review
+    for opt in data.get("options", []):
+        exp = date.fromisoformat(opt["expiration"])
+        days_to_expiry = max(0, (exp - date.today()).days)
+        opt_type = opt["type"]
+        qty = abs(opt["quantity"])
+        position_type = f"short_{opt_type}" if opt["quantity"] < 0 else f"long_{opt_type}"
+
+        positions.append(Position(
+            symbol=opt["symbol"],
+            position_type=position_type,
+            quantity=qty,
+            strike=Decimal(str(opt["strike"])),
+            expiration=exp,
+            entry_price=Decimal(str(opt["entry_price"])),
+            current_price=Decimal(str(opt["current_price"])),
+            underlying_price=Decimal("0"),  # filled by caller with market data
+            cost_basis=Decimal(str(opt["strike"])) * 100,
+            delta=0.0, theta=0.0, gamma=0.0, vega=0.0, iv=0.0,
+            days_to_expiry=days_to_expiry,
+            option_type=opt_type,
+        ))
+
+    # Estimate NLV from stock positions
+    total_stock_value = Decimal("0")
+    concentration: dict[str, float] = {}
+    for stk in data.get("stocks", []):
+        # Use cost basis as proxy — real price comes from market data
+        value = Decimal(str(stk["cost_basis"])) * stk["quantity"]
+        total_stock_value += value
+
+    nlv = float(total_stock_value) if total_stock_value > 0 else 1_000_000.0
+
+    # Build concentration from stock holdings
+    for stk in data.get("stocks", []):
+        value = float(Decimal(str(stk["cost_basis"])) * stk["quantity"])
+        concentration[stk["symbol"]] = value / nlv
+
+    logger.info("portfolio_loaded_yaml",
+                options=len(positions),
+                stocks=len(data.get("stocks", [])),
+                estimated_nlv=round(nlv))
+
+    return PortfolioState(
+        positions=positions,
+        net_liquidation=Decimal(str(round(nlv))),
+        concentration=concentration,
+    )
+
+
 def load_portfolio_state() -> PortfolioState:
-    """Load current portfolio from Alpaca and convert to PortfolioState."""
+    """Load current portfolio — YAML snapshot first, then Alpaca fallback."""
+    # Prefer YAML snapshot (real positions) over Alpaca (paper)
+    if PORTFOLIO_YAML.exists():
+        return load_portfolio_from_yaml()
+
     try:
         client = AlpacaPaperClient()
         account = client.get_account()

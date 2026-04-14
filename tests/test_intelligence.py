@@ -486,7 +486,9 @@ class TestPortfolioLoading:
 
         mock_client = MagicMock()
         mock_client.get_account.return_value = mock_account
-        with patch("src.data.portfolio.AlpacaPaperClient", return_value=mock_client):
+        from pathlib import Path
+        with patch("src.data.portfolio.PORTFOLIO_YAML", Path("/nonexistent/portfolio.yaml")), \
+             patch("src.data.portfolio.AlpacaPaperClient", return_value=mock_client):
             state = load_portfolio_state()
 
         assert state.buying_power == Decimal("250000")
@@ -507,7 +509,9 @@ class TestPortfolioLoading:
 
         mock_client = MagicMock()
         mock_client.get_account.return_value = mock_account
-        with patch("src.data.portfolio.AlpacaPaperClient", return_value=mock_client):
+        from pathlib import Path
+        with patch("src.data.portfolio.PORTFOLIO_YAML", Path("/nonexistent/portfolio.yaml")), \
+             patch("src.data.portfolio.AlpacaPaperClient", return_value=mock_client):
             state = load_portfolio_state()
 
         assert state.positions == []

@@ -118,10 +118,33 @@ def authenticate_interactive(sandbox: bool = True) -> ETradeSession:
     return session
 
 
+def renew_tokens(oauth_token: str, oauth_secret: str) -> bool:
+    """Renew access tokens to extend the session (up to 2 hours).
+
+    E*Trade allows renewal until midnight ET. After midnight, tokens are
+    permanently expired and require a fresh browser-based OAuth flow.
+    """
+    try:
+        mgr = pyetrade.ETradeAccessManager(
+            client_key=CONSUMER_KEY,
+            client_secret=CONSUMER_SECRET,
+            resource_owner_key=oauth_token,
+            resource_owner_secret=oauth_secret,
+        )
+        result = mgr.renew_access_token()
+        if result:
+            logger.info("etrade_tokens_renewed")
+        return bool(result)
+    except Exception as e:
+        logger.warning("etrade_token_renewal_failed", error=str(e))
+        return False
+
+
 def get_session(sandbox: bool = True) -> ETradeSession:
     """Load saved tokens and return an authenticated session.
 
-    Raises RuntimeError if tokens are missing or expired.
+    Tries to renew tokens if they appear expired. Raises RuntimeError
+    if tokens are missing or permanently expired (past midnight ET).
     """
     saved = load_tokens()
     if not saved:
@@ -140,23 +163,49 @@ def get_session(sandbox: bool = True) -> ETradeSession:
         session.accounts.list_accounts()
         logger.info("etrade_session_loaded", sandbox=is_sandbox)
         return session
-    except Exception as e:
+    except Exception:
+        # Try renewing before giving up
+        logger.info("etrade_tokens_expired_attempting_renewal")
+        if renew_tokens(oauth_token, oauth_secret):
+            # Rebuild clients with same tokens (renewal extends server-side)
+            session = _build_clients(oauth_token, oauth_secret, is_sandbox)
+            try:
+                session.accounts.list_accounts()
+                logger.info("etrade_session_restored_via_renewal")
+                return session
+            except Exception:
+                pass
         raise RuntimeError(
-            f"E*Trade tokens expired ({e}). Run: python -m src.data.auth"
-        ) from e
+            "E*Trade tokens expired and renewal failed (past midnight ET). "
+            "Run: python -m src.data.auth"
+        )
 
 
 # Allow running directly: python -m src.data.auth
 if __name__ == "__main__":
     import sys
     sandbox = "--live" not in sys.argv
-    mode = "SANDBOX" if sandbox else "PRODUCTION"
-    print(f"E*Trade OAuth — {mode} mode")
-    print("=" * 40)
-    session = authenticate_interactive(sandbox=sandbox)
-    # Quick verification
-    accounts = session.accounts.list_accounts()
-    acct_list = accounts["AccountListResponse"]["Accounts"]["Account"]
-    print(f"\nSuccess! Found {len(acct_list)} account(s):")
-    for a in acct_list:
-        print(f"  - {a.get('accountDesc', a['accountIdKey'])}")
+
+    if "--renew" in sys.argv:
+        # Headless token renewal for cron use
+        saved = load_tokens()
+        if not saved:
+            print("No saved tokens. Run: python -m src.data.auth --live")
+            sys.exit(1)
+        ok = renew_tokens(str(saved["oauth_token"]), str(saved["oauth_secret"]))
+        if ok:
+            print("Tokens renewed successfully.")
+        else:
+            print("Token renewal failed (expired past midnight ET?).")
+            sys.exit(1)
+    else:
+        mode = "SANDBOX" if sandbox else "PRODUCTION"
+        print(f"E*Trade OAuth — {mode} mode")
+        print("=" * 40)
+        session = authenticate_interactive(sandbox=sandbox)
+        # Quick verification
+        accounts = session.accounts.list_accounts()
+        acct_list = accounts["AccountListResponse"]["Accounts"]["Account"]
+        print(f"\nSuccess! Found {len(acct_list)} account(s):")
+        for a in acct_list:
+            print(f"  - {a.get('accountDesc', a['accountIdKey'])}")

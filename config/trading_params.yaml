@@ -100,3 +100,7 @@ loss_management:
   weekly_loss_stop: 1.5
   # Max portfolio drawdown before circuit breaker
   max_drawdown_pct: 0.12
+
+shopping_list:
+  url: "https://docs.google.com/spreadsheets/d/12Fs_d8Zr4sKnoCxb5EaEbe2FciXIGPVTFGM9iehZq3M/gviz/tq?tqx=out:csv"
+  cache_ttl_hours: 24

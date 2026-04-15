@@ -37,6 +37,7 @@ from src.models.onboarding import (
     TransitionPlan,
 )
 from src.models.position import PortfolioState, Position
+from src.models.shopping_list import BenchEntry, ShoppingListEntry
 from src.models.signals import AlphaSignal
 from src.models.tax import TaxContext, TaxEngine, TradeTaxImpact, WashSaleTracker
 
@@ -67,6 +68,9 @@ __all__ = [
     "Opportunity",
     "SizedOpportunity",
     "RiskReport",
+    # Shopping list
+    "ShoppingListEntry",
+    "BenchEntry",
     # Accounts
     "BrokerageAccount",
     "AccountRouter",

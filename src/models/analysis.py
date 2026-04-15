@@ -54,6 +54,7 @@ class SizedOpportunity:
     signals: list[AlphaSignal] = field(default_factory=list)
     smart_strike: SmartStrike | None = None
     reasoning: str = ""
+    conviction_label: str | None = None
 
 
 @dataclass

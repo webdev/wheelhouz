@@ -57,6 +57,7 @@ def make_sized_opportunity(**overrides: Any) -> SizedOpportunity:
         "reasoning": "NVDA down 3.2% intraday, IV rank 65, at 200 SMA. "
                      "HIGH conviction: 2 confirming signals. "
                      "Sell 2x $800P at $12.50 for 19% annualized.",
+        "conviction_label": None,
     }
     defaults.update(overrides)
     return SizedOpportunity(**defaults)

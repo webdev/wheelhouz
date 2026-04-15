@@ -911,10 +911,10 @@ async def run_analysis_cycle(
     tax_engine = None
     if etrade_session:
         try:
-            from src.data.broker import fetch_ytd_transactions, populate_tax_engine_from_transactions
-            ytd_txns = fetch_ytd_transactions(etrade_session)
-            if ytd_txns:
-                tax_engine = populate_tax_engine_from_transactions(ytd_txns)
+            from src.data.broker import fetch_ytd_option_orders, populate_tax_engine_from_orders
+            ytd_orders = fetch_ytd_option_orders(etrade_session)
+            if ytd_orders:
+                tax_engine = populate_tax_engine_from_orders(ytd_orders)
         except Exception as e:
             log.warning("ytd_pnl_fetch_failed", error=str(e))
 

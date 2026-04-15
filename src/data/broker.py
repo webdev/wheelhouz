@@ -409,21 +409,22 @@ def fetch_etrade_chain(
     )
 
 
-# ── YTD Transactions ───────────────────────────────────────────
+# ── YTD Orders (for realized P&L) ──────────────────────────────
 
 
-def fetch_ytd_transactions(
+def fetch_ytd_option_orders(
     session: ETradeSession,
 ) -> list[dict[str, Any]]:
-    """Fetch all transactions YTD across all accounts.
+    """Fetch all executed option orders YTD across all accounts.
 
-    Paginates through E*Trade's list_transactions (max 50 per page)
-    from Jan 1 of the current year through today.
-    Returns raw transaction dicts for parsing.
+    Uses the Orders API (list_orders with status=EXECUTED) instead of
+    the Transactions API which requires separate authorization.
+    Paginates through all accounts, max 100 orders per page.
     """
     accounts = fetch_accounts(session)
-    jan1 = date(date.today().year, 1, 1)
-    all_txns: list[dict[str, Any]] = []
+    jan1 = datetime(date.today().year, 1, 1)
+    today = datetime.combine(date.today(), datetime.min.time())
+    all_orders: list[dict[str, Any]] = []
 
     for account in accounts:
         account_id = account["accountIdKey"]
@@ -432,131 +433,130 @@ def fetch_ytd_transactions(
         while True:
             _sleep()
             try:
-                # Use XML (default) — JSON suffix causes 401 on some E*Trade
-                # accounts. xmltodict converts the XML response to a dict
-                # with the same structure as JSON would return.
-                resp = session.accounts.list_transactions(
+                resp = session.order.list_orders(
                     account_id,
-                    start_date=jan1,
-                    end_date=date.today(),
-                    sort_order="DESC",
-                    count=50,
+                    status="EXECUTED",
+                    from_date=jan1,
+                    to_date=today,
+                    security_type="OPTN",
+                    count=100,
                     marker=marker,
-                    resp_format="xml",
+                    resp_format="json",
                 )
             except Exception as e:
-                logger.warning("etrade_transactions_failed",
+                logger.warning("etrade_orders_failed",
                                account_id=account_id, error=str(e))
                 break
 
-            if not resp:
+            if not resp or "OrdersResponse" not in resp:
                 break
 
-            # XML response wraps in TransactionListResponse
-            txn_resp = resp.get("TransactionListResponse", resp)
-            txn_list = txn_resp.get("Transaction", [])
-            if isinstance(txn_list, dict):
-                txn_list = [txn_list]
+            order_list = resp["OrdersResponse"].get("Order", [])
+            if isinstance(order_list, dict):
+                order_list = [order_list]
 
-            if not txn_list:
+            if not order_list:
                 break
 
-            for txn in txn_list:
-                txn["_account_id"] = account_id
-            all_txns.extend(txn_list)
+            for order in order_list:
+                order["_account_id"] = account_id
+            all_orders.extend(order_list)
 
-            # Pagination: marker for next page
-            marker = txn_resp.get("marker")
+            # Pagination
+            marker = resp["OrdersResponse"].get("marker")
             if not marker:
                 break
 
-    logger.info("ytd_transactions_fetched", count=len(all_txns))
-    return all_txns
+    logger.info("ytd_option_orders_fetched", count=len(all_orders))
+    return all_orders
 
 
-def populate_tax_engine_from_transactions(
-    transactions: list[dict[str, Any]],
+def populate_tax_engine_from_orders(
+    orders: list[dict[str, Any]],
 ) -> TaxEngine:
-    """Parse E*Trade transactions and populate a TaxEngine with YTD totals.
+    """Parse executed E*Trade option orders into YTD P&L.
 
-    E*Trade transaction types we care about:
-    - Sold/Bought options (premium income / close costs)
-    - Option expirations (worthless = full profit)
-    - Assignments (stock delivered or taken)
+    Each order has OrderDetail → Instrument[] with:
+    - orderAction: BUY_OPEN, SELL_OPEN, BUY_CLOSE, SELL_CLOSE
+    - filledQuantity, averageExecutionPrice
+    - Product: symbol, securityType, callPut, strikePrice, expiryYear/Month/Day
 
-    Transaction categories from the API:
-    - "Sold Short" / "Bought to Cover" → option open/close
-    - "Expired" → option expired worthless
-    - "Assigned" → option assignment
+    SELL_OPEN = premium received (new short position)
+    BUY_CLOSE = premium paid to close (match against opens)
     """
     engine = TaxEngine()
-    # Track open option trades by description for matching
-    # Key: (account_id, symbol_desc) → list of (amount, date)
-    open_premiums: dict[tuple[str, str], list[tuple[Decimal, date]]] = {}
+    # Track opens by option key for matching
+    # Key: (account_id, symbol, strike, expiry, callput) → list of (premium_per_contract, date)
+    open_premiums: dict[tuple, list[tuple[Decimal, date]]] = {}
 
-    for txn in transactions:
-        desc = txn.get("description", "")
-        acct = txn.get("_account_id", "")
+    for order in orders:
+        acct = order.get("_account_id", "")
+        details = order.get("OrderDetail", [])
+        if isinstance(details, dict):
+            details = [details]
 
-        # Parse transaction date
-        txn_date_str = txn.get("transactionDate")
-        txn_date = _parse_txn_date(txn_date_str)
+        for detail in details:
+            instruments = detail.get("Instrument", [])
+            if isinstance(instruments, dict):
+                instruments = [instruments]
 
-        # Brokerage transactions contain the actual trade details.
-        # XML (xmltodict) uses "Brokerage", JSON uses "brokerage".
-        brokerage = txn.get("brokerage") or txn.get("Brokerage") or {}
-        if not brokerage:
-            continue
+            exec_date = _parse_order_date(detail.get("executedTime"))
 
-        product = brokerage.get("product") or brokerage.get("Product") or {}
-        sec_type = product.get("securityType", "")
-        quantity = abs(int(float(brokerage.get("quantity", 0) or 0)))
-        price = _decimal(brokerage.get("price", 0))
+            for inst in instruments:
+                product = inst.get("Product", {})
+                if product.get("securityType") != "OPTN":
+                    continue
 
-        # Only process option transactions
-        if sec_type != "OPTN":
-            continue
+                action = inst.get("orderAction", "")
+                filled_qty = int(float(inst.get("filledQuantity", 0) or 0))
+                avg_price = _decimal(inst.get("averageExecutionPrice", 0))
 
-        action = brokerage.get("transactionType", "")
-        symbol_key = (acct, desc)
+                if filled_qty <= 0:
+                    continue
 
-        if action in ("Sold Short", "Sold"):
-            # Opening a short option = premium received
-            premium = price * quantity * 100
-            engine.option_premium_income_ytd += premium
-            open_premiums.setdefault(symbol_key, []).append(
-                (premium, txn_date or date.today())
-            )
+                # Build matching key from option contract details
+                option_key = (
+                    acct,
+                    product.get("symbol", ""),
+                    str(product.get("strikePrice", "")),
+                    f"{product.get('expiryYear', '')}-{product.get('expiryMonth', '')}-{product.get('expiryDay', '')}",
+                    product.get("callPut", ""),
+                )
 
-        elif action in ("Bought to Cover", "Bought"):
-            # Closing a short option = cost to close
-            close_cost = price * quantity * 100
-            # Match against open premium
-            opens = open_premiums.get(symbol_key, [])
-            if opens:
-                open_premium, open_date = opens.pop(0)
-                pnl = open_premium - close_cost
-            else:
-                # Can't match — treat close cost as the loss
-                pnl = -close_cost
+                premium_total = avg_price * filled_qty * 100
 
-            if pnl >= 0:
-                engine.realized_stcg_ytd += pnl  # all options are STCG
-            else:
-                engine.realized_losses_ytd += abs(pnl)
-                # Record for wash sale tracking
-                symbol = product.get("symbol", "")
-                if symbol and txn_date:
-                    engine.wash_sale_tracker.record_loss(
-                        symbol, txn_date, abs(pnl)
+                if action == "SELL_OPEN":
+                    engine.option_premium_income_ytd += premium_total
+                    open_premiums.setdefault(option_key, []).append(
+                        (avg_price, exec_date or date.today())
                     )
 
-        elif action == "Expired":
-            # Option expired worthless — full premium is profit
-            opens = open_premiums.get(symbol_key, [])
-            if opens:
-                open_premium, _ = opens.pop(0)
-                engine.realized_stcg_ytd += open_premium
+                elif action == "BUY_CLOSE":
+                    close_cost = premium_total
+                    opens = open_premiums.get(option_key, [])
+                    if opens:
+                        open_price, open_date = opens.pop(0)
+                        pnl = (open_price - avg_price) * filled_qty * 100
+                    else:
+                        # No matching open in YTD — likely opened last year.
+                        # Can't compute exact P&L, skip rather than guess.
+                        continue
+
+                    if pnl >= 0:
+                        engine.realized_stcg_ytd += pnl
+                    else:
+                        engine.realized_losses_ytd += abs(pnl)
+                        symbol = product.get("symbol", "")
+                        if symbol and exec_date:
+                            engine.wash_sale_tracker.record_loss(
+                                symbol, exec_date, abs(pnl)
+                            )
+
+                elif action in ("SELL_CLOSE", "BUY_OPEN"):
+                    # SELL_CLOSE = closing a long option (not wheel strategy)
+                    # BUY_OPEN = buying to open (not premium selling)
+                    # Track but don't count as wheel premium income
+                    pass
 
     logger.info(
         "tax_engine_populated",
@@ -567,15 +567,13 @@ def populate_tax_engine_from_transactions(
     return engine
 
 
-def _parse_txn_date(date_val: Any) -> date | None:
-    """Parse E*Trade transaction date (epoch ms or string)."""
+def _parse_order_date(date_val: Any) -> date | None:
+    """Parse E*Trade order execution date (epoch ms or string)."""
     if date_val is None:
         return None
     try:
-        # E*Trade returns epoch milliseconds as an integer
         if isinstance(date_val, (int, float)):
             return datetime.fromtimestamp(date_val / 1000).date()
-        # Or ISO string
         return datetime.fromisoformat(str(date_val)).date()
     except (ValueError, TypeError, OSError):
         return None

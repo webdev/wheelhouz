@@ -656,6 +656,10 @@ def format_local_briefing(
         if tv in ("SELL", "STRONG_SELL"):
             continue
 
+        # Skip overbought stocks — don't sell puts into a potential reversal
+        if rsi is not None and rsi > 65:
+            continue
+
         # Skip if earnings within 14 days (don't open new through earnings)
         if cal.next_earnings and cal.next_earnings <= date.today() + timedelta(days=14):
             continue
@@ -774,9 +778,18 @@ def format_local_briefing(
         for pos in portfolio_state.positions:
             if pos.position_type != "long_stock" or pos.quantity < 1:
                 continue
-            if pos.cost_basis <= 0 or pos.underlying_price <= 0:
+            if pos.underlying_price <= 0:
                 continue
-            pnl_pct = float((pos.underlying_price - pos.cost_basis) / pos.cost_basis)
+            # cost_basis may be total (all shares) or per-share — normalize
+            if pos.cost_basis <= 0:
+                continue
+            per_share_cost = pos.cost_basis
+            if pos.quantity > 1 and per_share_cost > pos.underlying_price * 3:
+                # Likely total cost basis, not per-share — normalize
+                per_share_cost = pos.cost_basis / pos.quantity
+            if per_share_cost <= 0:
+                continue
+            pnl_pct = float((pos.underlying_price - per_share_cost) / per_share_cost)
             sym_tv = tv_by_sym.get(pos.symbol, "")
 
             # Find underperformers: down significantly OR bearish consensus
@@ -791,7 +804,7 @@ def format_local_briefing(
 
             if reason_parts:
                 realloc_candidates.append((
-                    pos.symbol, pos.quantity, pos.cost_basis,
+                    pos.symbol, pos.quantity, per_share_cost,
                     pos.underlying_price, pnl_pct, " | ".join(reason_parts),
                 ))
 
@@ -833,17 +846,24 @@ def format_local_briefing(
                     f"| Yield: {yield_on_cap:.1f}% ({ann_yield:.0f}% ann)"
                 )
 
-            # Sizing: 1.5% NLV target per position
+            # Sizing: 1.5% NLV target, hard cap at 5% NLV
             if nlv > 0:
                 target_alloc = float(nlv) * 0.015
+                max_alloc = float(nlv) * 0.05
                 if rec_type == "BUY 100 SHARES":
                     cost = price * 100
+                    if cost > max_alloc:
+                        continue  # too expensive, skip
                     lines.append(f"    Size: 100 shares (${cost:,.0f}, "
                                  f"~{cost / float(nlv):.1%} NLV) — then sell covered calls")
                 elif put_contract:
                     strike_f = float(put_contract.strike)
                     contracts = max(1, int(target_alloc / (strike_f * 100))) if strike_f > 0 else 1
                     collateral = Decimal(contracts) * put_contract.strike * 100
+                    # Cap at 5% NLV
+                    while float(collateral) > max_alloc and contracts > 1:
+                        contracts -= 1
+                        collateral = Decimal(contracts) * put_contract.strike * 100
                     total_premium = Decimal(contracts) * put_contract.mid * 100
                     lines.append(
                         f"    Size: {contracts}x ${put_contract.strike} puts "
@@ -988,13 +1008,14 @@ def format_local_briefing(
             lines.append(f"  Wash sale blocks:   {_C.red(', '.join(blocked))}")
 
     # ── SKIP — names the system looked at and explicitly rejected ──
-    # Collect symbols already covered in DO NOW / CONSIDER / WATCH
+    # Collect symbols already covered in DO NOW / CONSIDER / WATCH / OPPORTUNITIES
     covered: set[str] = set()
     if recommendations:
         covered.update(r.symbol for r in recommendations)
     if position_reviews:
         covered.update(p.symbol for p in position_reviews)
-    # TV-driven opportunities are now in recommendations, so they're already covered
+    # Opportunity names are already recommended — don't show in SKIP
+    covered.update(sym for sym, _, _, _, _ in opportunities)
 
     # Build skip reasons for uncovered symbols
     tv_by_symbol: dict[str, str] = {}

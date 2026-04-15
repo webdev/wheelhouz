@@ -1480,10 +1480,71 @@ async def mode_weekend_review() -> None:
 
 
 async def mode_daemon() -> None:
-    """Full daemon mode — 5x daily analysis + continuous monitor + sentinel."""
-    log.info("daemon_start", cycles=len(ANALYSIS_CYCLES))
-    await run_morning_briefing()
-    log.info("daemon_running", message="Continuous monitor would start here")
+    """Long-running daemon: renew tokens every hour, run briefings on schedule.
+
+    Default schedule: morning (8:00 AM ET) + post-market (4:30 PM ET).
+    Token renewal every 60 minutes keeps E*Trade session alive until midnight ET.
+    """
+    from zoneinfo import ZoneInfo
+
+    et = ZoneInfo("America/New_York")
+    # Which cycles to run full briefings (always_push ones by default)
+    briefing_cycles = [c for c in ANALYSIS_CYCLES if c["always_push"]]
+    cycle_times = {c["time"] for c in briefing_cycles}
+    cycle_names = {c["time"]: c["name"] for c in briefing_cycles}
+
+    log.info("daemon_start",
+             briefing_times=[t.strftime("%H:%M") for t in sorted(cycle_times)],
+             token_renewal="every 60 min")
+
+    last_renewal = datetime.min
+    ran_today: set[str] = set()  # cycle names already run today
+
+    while True:
+        now_et = datetime.now(et)
+        today_str = now_et.strftime("%Y-%m-%d")
+
+        # Reset ran_today at midnight
+        if not any(today_str in s for s in ran_today):
+            ran_today.clear()
+
+        # Token renewal every 60 minutes
+        if (datetime.now() - last_renewal).total_seconds() > 3600:
+            try:
+                from src.data.auth import load_tokens, renew_tokens
+                saved = load_tokens()
+                if saved:
+                    ok = renew_tokens(str(saved["oauth_token"]), str(saved["oauth_secret"]))
+                    if ok:
+                        log.info("daemon_token_renewed")
+                    else:
+                        log.warning("daemon_token_renewal_failed")
+                last_renewal = datetime.now()
+            except Exception as e:
+                log.warning("daemon_renewal_error", error=str(e))
+
+        # Check if it's time for a briefing
+        for cycle_time in sorted(cycle_times):
+            key = f"{today_str}:{cycle_names[cycle_time]}"
+            if key in ran_today:
+                continue
+            # Run if we're within 5 minutes after the scheduled time
+            scheduled = now_et.replace(
+                hour=cycle_time.hour, minute=cycle_time.minute, second=0,
+            )
+            delta = (now_et - scheduled).total_seconds()
+            if 0 <= delta <= 300:  # within 5 min window
+                log.info("daemon_briefing_start", cycle=cycle_names[cycle_time])
+                try:
+                    await run_analysis_cycle(
+                        cycle_names[cycle_time], always_push=True,
+                    )
+                except Exception as e:
+                    log.error("daemon_briefing_failed", error=str(e))
+                ran_today.add(key)
+
+        # Sleep 60 seconds before next check
+        await asyncio.sleep(60)
 
 
 # ---------------------------------------------------------------------------

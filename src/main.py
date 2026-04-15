@@ -42,7 +42,7 @@ from src.intelligence.position_review import PositionReview, review_position, fo
 from src.data.portfolio import load_portfolio_state
 from src.delivery.reasoning import generate_analyst_brief
 from src.models.intelligence import IntelligenceContext
-from src.models.shopping_list import ShoppingListEntry
+from src.models.shopping_list import BenchEntry, ShoppingListEntry
 
 log = structlog.get_logger()
 
@@ -847,6 +847,7 @@ def format_local_briefing(
     tax_engine: Any | None = None,
     portfolio_state: Any | None = None,
     scanner_picks: list[ScannerPick] | None = None,
+    bench: list[BenchEntry] | None = None,
 ) -> str:
     """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
     from datetime import date, timedelta
@@ -963,9 +964,11 @@ def format_local_briefing(
             if _symbol_option_count.get(r.symbol, 0) >= 3:
                 continue
             # Skip if adding this trade would push symbol over 10% NLV
-            new_exposure = float(r.strike) * 100 * r.contracts
-            if (_symbol_exposure.get(r.symbol, 0) + new_exposure) / _nlv_f > 0.10:
-                continue
+            # (only apply when NLV is known; skip check when no portfolio data)
+            if nlv > 0:
+                new_exposure = float(r.strike) * 100 * r.contracts
+                if (_symbol_exposure.get(r.symbol, 0) + new_exposure) / _nlv_f > 0.10:
+                    continue
 
             exp_str = _fmt_exp(r.expiration) if r.expiration else "~30 DTE"
             delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
@@ -979,6 +982,8 @@ def format_local_briefing(
             trade_label = "Sell Covered Call" if is_call else "Sell Cash-Secured Put"
             opt_letter = "C" if is_call else "P"
             lines.append(f"  >>> {_C.bold(r.symbol)} — {_C.green(trade_label)}")
+            if r.conviction_label:
+                lines.append(f"      {r.conviction_label}")
             lines.append(
                 f"      {r.contracts}x ${r.strike} {opt_letter} exp {exp_str} "
                 f"@ ${r.premium} mid"
@@ -1018,9 +1023,11 @@ def format_local_briefing(
             # Same concentration / position-cap guards as DO NOW
             if _symbol_option_count.get(r.symbol, 0) >= 3:
                 continue
-            new_exposure = float(r.strike) * 100 * r.contracts
-            if (_symbol_exposure.get(r.symbol, 0) + new_exposure) / _nlv_f > 0.10:
-                continue
+            # Only apply concentration check when NLV is known
+            if nlv > 0:
+                new_exposure = float(r.strike) * 100 * r.contracts
+                if (_symbol_exposure.get(r.symbol, 0) + new_exposure) / _nlv_f > 0.10:
+                    continue
 
             exp_str = _fmt_exp(r.expiration) if r.expiration else "~30 DTE"
             delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
@@ -1033,6 +1040,8 @@ def format_local_briefing(
             is_call = r.trade_type == "sell_call"
             opt_type = "Call" if is_call else "Put"
             consider_lines.append(f"   >> {_C.bold(r.symbol)} — Sell ${r.strike} {opt_type} exp {exp_str}")
+            if r.conviction_label:
+                consider_lines.append(f"      {r.conviction_label}")
             consider_lines.append(
                 f"      {r.contracts}x @ ${r.premium} mid | "
                 f"{r.annualized_yield:.0%} ann.{delta_str}{tv_str}"
@@ -1466,8 +1475,50 @@ def format_local_briefing(
         if not opportunities:
             lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
                          f"— ${cash:,.0f} cash available")
-        lines.append(f"\n  🔍 {_C.bold('SCANNER PICKS')} — high-IV names outside your watchlist")
+        # Determine header based on whether picks came from shopping list
+        has_sl_picks = scanner_picks and any(p.shopping_list_rating for p in scanner_picks)
+        has_finviz = scanner_picks and any(p.shopping_list_rating is None for p in scanner_picks)
+        if has_sl_picks and has_finviz:
+            scanner_header = "from your shopping list + scanner"
+        elif has_sl_picks:
+            scanner_header = "from your shopping list"
+        else:
+            scanner_header = "high-IV names outside your watchlist"
+        lines.append(f"\n  🔍 {_C.bold('SCANNER PICKS')} — {scanner_header}")
         lines.extend(scanner_lines)
+
+    # ── BENCH — shopping list names approaching entry ──
+    if bench:
+        lines.append(f"\n📋 {_C.bold('BENCH')} — shopping list names approaching entry")
+        for b in bench:
+            # Price target + upside
+            target_str = ""
+            if b.price_target:
+                if b.upside_pct is not None:
+                    target_str = f" → ${b.price_target} ({b.upside_pct:+.0%})"
+                else:
+                    target_str = f" → ${b.price_target}"
+
+            # Earnings display
+            earns_str = ""
+            if b.next_earnings:
+                earns_str = f" | Earns {b.next_earnings.strftime('%b')} {b.next_earnings.day}"
+
+            if b.near_actionable:
+                # Expanded format
+                lines.append(
+                    f"  🔥 {_C.bold(b.ticker):8s} {b.rating:12s} "
+                    f"${b.current_price:<7,.0f}{target_str} "
+                    f"| IV {b.iv_rank:.0f} | RSI {b.rsi:.0f}{earns_str}"
+                )
+                lines.append(f"     READY: {b.actionable_reason}")
+            else:
+                # Compact one-liner
+                lines.append(
+                    f"  {b.ticker:8s} {b.rating:12s} "
+                    f"${b.current_price:<7,.0f}{target_str} "
+                    f"| IV {b.iv_rank:.0f} | RSI {b.rsi:.0f}{earns_str}"
+                )
 
     # ── REALLOCATE — underperforming positions to redeploy ──
     if realloc_candidates:

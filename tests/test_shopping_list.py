@@ -390,3 +390,60 @@ class TestScannerIntegration:
         )
         assert pick.shopping_list_rating is None
         assert pick.price_target is None
+
+
+class TestBriefingIntegration:
+    def test_bench_section_renders(self) -> None:
+        """BENCH section appears in briefing when bench entries provided."""
+        from src.main import format_local_briefing
+
+        regime = MagicMock()
+        regime.regime = "attack"
+
+        bench = [
+            BenchEntry(
+                ticker="HIMS", name="Hims & Hers", rating="Buy",
+                current_price=Decimal("42"), price_target="45-55",
+                upside_pct=0.15, iv_rank=72.0, rsi=28.0,
+                next_earnings=date(2026, 5, 5),
+                near_actionable=True,
+                actionable_reason="IV rank 72 — premium rich. RSI 28 — oversold pullback entry",
+            ),
+            BenchEntry(
+                ticker="AVGO", name="Broadcom", rating="Top 15 Stock",
+                current_price=Decimal("192"), price_target="400-440",
+                upside_pct=1.29, iv_rank=38.0, rsi=55.0,
+                next_earnings=date(2026, 5, 29),
+                near_actionable=False, actionable_reason=None,
+            ),
+        ]
+
+        briefing = format_local_briefing(
+            regime=regime, vix=18.5, spy_change=0.003,
+            all_signals=[], watchlist_data=[], tax_alerts=[],
+            bench=bench,
+        )
+        assert "BENCH" in briefing
+        assert "HIMS" in briefing
+        assert "AVGO" in briefing
+        # Near-actionable gets expanded treatment
+        assert "READY" in briefing
+
+    def test_conviction_label_in_recommendation(self) -> None:
+        """Parkev label appears in recommendation rendering."""
+        from src.main import format_local_briefing
+
+        regime = MagicMock()
+        regime.regime = "attack"
+
+        recs = [make_sized_opportunity(
+            conviction="high",
+            conviction_label="⬆ Upgraded (Top 15 Stock — Parkev)",
+        )]
+
+        briefing = format_local_briefing(
+            regime=regime, vix=18.5, spy_change=0.003,
+            all_signals=[], watchlist_data=[], tax_alerts=[],
+            recommendations=recs,
+        )
+        assert "Parkev" in briefing

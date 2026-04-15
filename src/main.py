@@ -664,6 +664,14 @@ def _format_stress_value(value: Decimal) -> str:
     return f"${value:,.0f} loss"
 
 
+def _fmt_exp(d: "date") -> str:
+    """Format expiration date — include year tick for dates beyond this calendar year."""
+    from datetime import date as date_cls
+    if d.year > date_cls.today().year:
+        return d.strftime("%b %d '%y")
+    return d.strftime("%b %d")
+
+
 def _format_position_desc(p: PositionReview) -> str:
     """Format a position review into a readable description like 'GOOG -4x Dec 18 $380 call'."""
     if not p.option_type:
@@ -806,7 +814,7 @@ def format_local_briefing(
             if (_symbol_exposure.get(r.symbol, 0) + new_exposure) / _nlv_f > 0.10:
                 continue
 
-            exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
+            exp_str = _fmt_exp(r.expiration) if r.expiration else "~30 DTE"
             delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
             tv_str = ""
             if intel_contexts:
@@ -862,7 +870,7 @@ def format_local_briefing(
             if (_symbol_exposure.get(r.symbol, 0) + new_exposure) / _nlv_f > 0.10:
                 continue
 
-            exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
+            exp_str = _fmt_exp(r.expiration) if r.expiration else "~30 DTE"
             delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
             tv_str = ""
             if intel_contexts:
@@ -1163,7 +1171,7 @@ def format_local_briefing(
                 yield_on_cap = (mid / strike_f) * 100 if strike_f > 0 else 0
                 lines.append(
                     f"    {_C.bold('Strike')}: ${put_contract.strike} "
-                    f"| {_C.bold('Exp')}: {put_contract.expiration.strftime('%b %d')} ({dte}d) "
+                    f"| {_C.bold('Exp')}: {_fmt_exp(put_contract.expiration)} ({dte}d) "
                     f"| {_C.bold('Bid')}: ${bid:.2f} "
                     f"| {_C.bold('Delta')}: {abs(put_contract.delta):.2f}"
                 )
@@ -1212,7 +1220,7 @@ def format_local_briefing(
             lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
                          f"— ${cash:,.0f} cash available")
         lines.append(f"\n  🔍 {_C.bold('SCANNER PICKS')} — high-IV names outside your watchlist")
-        max_alloc_scanner = float(nlv) * 0.05 if nlv > 0 else 50_000
+        max_alloc_scanner = float(nlv) * 0.02 if nlv > 0 else 20_000
         shown = 0
         for pick in scanner_picks:
             if shown >= 6:
@@ -1239,7 +1247,7 @@ def format_local_briefing(
                     if spread_pct > 0.50:
                         continue  # too wide — illiquid options
 
-            # Tier label from market cap
+            # Tier label from market cap — skip small caps (T3)
             if pick.market_cap >= 10_000_000_000:
                 tier = "T1"
             elif pick.market_cap >= 2_000_000_000:
@@ -1248,6 +1256,9 @@ def format_local_briefing(
                 tier = "T3"
             else:
                 tier = ""
+            # T3 (small cap < $2B) too risky for scanner picks
+            if tier == "T3":
+                continue
             tier_str = f" [{tier}]" if tier else ""
 
             shown += 1
@@ -1260,7 +1271,7 @@ def format_local_briefing(
                 otm_pct = (1 - float(pc.strike) / pick.price) * 100 if pick.price > 0 else 0
                 lines.append(
                     f"    {_C.bold('Strike')}: ${pc.strike} ({otm_pct:.0f}% OTM) "
-                    f"| {_C.bold('Exp')}: {pc.expiration.strftime('%b %d')} ({dte}d) "
+                    f"| {_C.bold('Exp')}: {_fmt_exp(pc.expiration)} ({dte}d) "
                     f"| {_C.bold('Bid')}: ${float(pc.bid):.2f}"
                     f"{delta_str}"
                 )
@@ -1272,8 +1283,8 @@ def format_local_briefing(
                     f"| Yield: {yield_pct:.1f}% ({pick.ann_yield:.0f}% ann)"
                 )
             if nlv > 0:
-                target_alloc = float(nlv) * 0.015
-                max_alloc = float(nlv) * 0.05
+                target_alloc = float(nlv) * 0.01   # conservative for scanner picks
+                max_alloc = float(nlv) * 0.02
                 if pick.put_contract:
                     strike_f = float(pick.put_contract.strike)
                     contracts = max(1, int(target_alloc / (strike_f * 100))) if strike_f > 0 else 1

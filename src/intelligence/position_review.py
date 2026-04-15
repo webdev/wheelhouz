@@ -113,7 +113,12 @@ def _make_review(
     roll: RollRecommendation | None = None,
 ) -> PositionReview:
     """Build a PositionReview with full position details."""
-    exp_str = position.expiration.strftime("%b %d") if position.expiration else ""
+    if position.expiration:
+        # Show year for expirations beyond the current calendar year
+        fmt = "%b %d '%y" if position.expiration.year > date.today().year else "%b %d"
+        exp_str = position.expiration.strftime(fmt)
+    else:
+        exp_str = ""
     multiplier = 100 if position.option_type else 1
     return PositionReview(
         symbol=position.symbol,
@@ -344,7 +349,9 @@ def _build_roll(
     return RollRecommendation(
         close_price=close_price,
         new_strike=new_strike,
-        new_expiration=new_exp_date.strftime("%b %d"),
+        new_expiration=new_exp_date.strftime(
+            "%b %d '%y" if new_exp_date.year > date.today().year else "%b %d"
+        ),
         new_premium=new_premium,
         net_credit=net_credit,
         total_net=total_net,
@@ -553,6 +560,21 @@ def review_position(
         reason = (f"Captured {pnl_pct:.0%} with {position.days_to_expiry}d left in "
                   f"high IV (rank {iv_rank:.0f}) — close for ${profit_dollars:,.0f} profit "
                   f"and redeploy into a richer cycle")
+        return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct, roll=roll)
+
+    # 2d. High-vol earnings movers with significant profit: close before report.
+    # These names routinely move 10%+ on earnings — locking in ≥50% of premium
+    # before the report is the smart play, even on long-dated positions.
+    if (is_short and pnl_pct >= 0.50
+            and earnings_before_expiry
+            and position.symbol in _HIGH_VOL_EARNINGS_MOVERS):
+        earnings_date_val = context.events.next_earnings
+        days_to_earnings = (earnings_date_val - date.today()).days
+        profit_dollars = pnl * 100 * position.quantity
+        close_cost = position.current_price * 100 * position.quantity
+        reason = (f"{position.symbol} reports in {days_to_earnings}d and routinely moves 10%+ — "
+                  f"close to lock in ${profit_dollars:,.0f} profit ({pnl_pct:.0%} captured), "
+                  f"buy to close for ${close_cost:,.0f} and re-sell after IV crush")
         return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct, roll=roll)
 
     # 3. WATCH CLOSELY checks — every reason must say WHAT TO DO

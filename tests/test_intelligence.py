@@ -1449,7 +1449,8 @@ class TestHighVolEarningsMovers:
             ),
         )
         result = review_position(pos, ctx)
-        assert result.action == "WATCH CLOSELY"
+        # High-vol earner with 58% captured + earnings imminent → TAKE PROFIT
+        assert result.action == "TAKE PROFIT"
         assert "routinely moves" in result.reasoning or "10%+" in result.reasoning
 
     def test_non_volatile_name_says_safe_to_hold(self) -> None:

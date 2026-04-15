@@ -1507,9 +1507,9 @@ def format_local_briefing(
                 earns_str = f" | Earns {b.next_earnings.strftime('%b')} {b.next_earnings.day}"
 
             if b.near_actionable:
-                # Expanded format
+                # Expanded format — pad ticker BEFORE bold() so ANSI codes don't break width
                 lines.append(
-                    f"  🔥 {_C.bold(b.ticker):8s} {b.rating:12s} "
+                    f"  🔥 {_C.bold(b.ticker.ljust(8))} {b.rating:12s} "
                     f"${b.current_price:<7,.0f}{target_str} "
                     f"| IV {b.iv_rank:.0f} | RSI {b.rsi:.0f}{earns_str}"
                 )

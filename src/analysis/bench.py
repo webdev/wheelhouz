@@ -155,16 +155,24 @@ async def build_bench(
             rs = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] != 0 else 100
             rsi = float(100 - (100 / (1 + rs)))
 
-            # IV rank proxy — rough approximation using HV percentile.
-            # hv_min uses 60-day window * 0.5 as a floor estimate since we only
-            # have 3mo of data, not a full 252-day range. This biases IV rank
-            # slightly upward but is acceptable for bench screening (not trade sizing).
+            # IV rank proxy — rolling HV percentile over available history.
+            # For each rolling 20-day window, compute annualised HV, then report
+            # where today's 20-day HV sits in [min, max] of that series (0-100).
+            # Works correctly with ~40 bars (3 months of daily data).
             if len(close) >= 20:
                 returns = close.pct_change().dropna()
-                hv_20 = float(returns.tail(20).std() * (252 ** 0.5) * 100)
-                hv_max = float(returns.std() * (252 ** 0.5) * 100)
-                hv_min = float(returns.tail(min(60, len(returns))).std() * (252 ** 0.5) * 100) * 0.5
-                iv_rank = min(100.0, max(0.0, (hv_20 - hv_min) / (hv_max - hv_min) * 100)) if hv_max > hv_min else 50.0
+                ann = 252 ** 0.5 * 100
+                hv_series = returns.rolling(20).std().dropna() * ann
+                if len(hv_series) >= 2:
+                    hv_current = float(hv_series.iloc[-1])
+                    hv_min = float(hv_series.min())
+                    hv_max = float(hv_series.max())
+                    iv_rank = (
+                        min(100.0, max(0.0, (hv_current - hv_min) / (hv_max - hv_min) * 100))
+                        if hv_max > hv_min else 50.0
+                    )
+                else:
+                    iv_rank = 50.0
             else:
                 iv_rank = 50.0
 

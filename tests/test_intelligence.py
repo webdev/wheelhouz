@@ -1114,6 +1114,7 @@ class TestRollDirection:
                                delta=-0.10, implied_vol=0.44, volume=80, open_interest=250),
             ],
             calls=[],
+            expirations=[date(2026, 6, 30)],
         )
         ctx = make_intelligence_context(
             symbol="AMZN",
@@ -1512,15 +1513,15 @@ class TestOpportunitiesSection:
             puts=[
                 OptionContract(
                     strike=Decimal("185"), expiration=exp_date,
-                    option_type="put", bid=Decimal("2.10"), ask=Decimal("2.30"),
-                    mid=Decimal("2.20"), volume=500, open_interest=2000,
-                    implied_vol=0.28, delta=-0.22,
+                    option_type="put", bid=Decimal("5.00"), ask=Decimal("5.40"),
+                    mid=Decimal("5.20"), volume=500, open_interest=2000,
+                    implied_vol=0.42, delta=-0.22,
                 ),
                 OptionContract(
                     strike=Decimal("180"), expiration=exp_date,
-                    option_type="put", bid=Decimal("1.50"), ask=Decimal("1.70"),
-                    mid=Decimal("1.60"), volume=300, open_interest=1500,
-                    implied_vol=0.30, delta=-0.16,
+                    option_type="put", bid=Decimal("3.80"), ask=Decimal("4.20"),
+                    mid=Decimal("4.00"), volume=300, open_interest=1500,
+                    implied_vol=0.40, delta=-0.16,
                 ),
             ],
         )
@@ -1563,9 +1564,9 @@ class TestOpportunitiesSection:
         # Option contract details should appear for SELL PUT
         assert "Strike: $185" in clean
         assert "37d" in clean
-        assert "Bid: $2.10" in clean
+        assert "Bid: $5.00" in clean
         assert "Delta: 0.22" in clean
-        assert "Premium: $2.20/contract" in clean
+        assert "Premium: $5.20/contract" in clean
 
     def test_no_opportunities_when_no_cash(self) -> None:
         """No cash = no OPPORTUNITIES section."""
@@ -1646,8 +1647,8 @@ class TestWheelFocusedRecommendations:
         exp_date = date.today() + timedelta(days=37)
         chain = make_options_chain(symbol="NVDA", puts=[
             OptionContract(strike=Decimal("480"), expiration=exp_date, option_type="put",
-                           bid=Decimal("5.00"), ask=Decimal("5.40"), mid=Decimal("5.20"),
-                           volume=1000, open_interest=5000, implied_vol=0.32, delta=-0.22),
+                           bid=Decimal("13.00"), ask=Decimal("13.40"), mid=Decimal("13.20"),
+                           volume=1000, open_interest=5000, implied_vol=0.45, delta=-0.22),
         ])
         cal = make_event_calendar(symbol="NVDA", next_earnings=date.today() + timedelta(days=60))
         intel_ctx = make_intelligence_context(

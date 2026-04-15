@@ -184,6 +184,8 @@ class ScannerPick:
     reasons: list[str]
     collateral_per_contract: float  # strike * 100
     ann_yield: float  # annualized premium yield
+    market_cap: float = 0.0  # in dollars, for tier labeling
+    next_earnings: Any = None  # date | None — for earnings gate
 
 
 def scan_wheel_candidates(
@@ -234,6 +236,25 @@ def scan_wheel_candidates(
 
             closes = [float(c) for c in hist["Close"]]
             price = closes[-1]
+
+            # Market cap + earnings date from yfinance
+            mcap = 0.0
+            next_earn = None
+            try:
+                info = ticker.info
+                mcap = float(info.get("marketCap", 0) or 0)
+                # Earnings date — yfinance returns as timestamp
+                earn_ts = info.get("earningsTimestamp") or info.get("mostRecentQuarter")
+                if not earn_ts:
+                    # Try the calendar approach
+                    earn_dates = ticker.get_earnings_dates(limit=4)
+                    if earn_dates is not None and not earn_dates.empty:
+                        from datetime import date as date_cls
+                        future = [d.date() for d in earn_dates.index if d.date() > date_cls.today()]
+                        if future:
+                            next_earn = min(future)
+            except Exception:
+                pass
 
             from src.data.market import _calculate_rsi
             rsi = _calculate_rsi(closes)
@@ -289,20 +310,26 @@ def scan_wheel_candidates(
                     today = date_type.today()
                     # E*Trade provides real delta; yfinance has delta=0.0
                     has_delta = any(abs(p.delta) > 0.01 for p in chain.puts[:5])
+
+                    def _valid_put(p: Any) -> bool:
+                        dte = (p.expiration - today).days
+                        if not (20 <= dte <= 55 and p.bid > 0):
+                            return False
+                        # Never recommend puts that expire after earnings
+                        if next_earn and p.expiration >= next_earn:
+                            return False
+                        return True
+
                     if has_delta:
                         put_candidates = [
                             p for p in chain.puts
-                            if 0.10 <= abs(p.delta) <= 0.35
-                            and 20 <= (p.expiration - today).days <= 55
-                            and p.bid > 0
+                            if 0.10 <= abs(p.delta) <= 0.35 and _valid_put(p)
                         ]
                     else:
                         # Fallback: select by strike distance (5-15% OTM)
                         put_candidates = [
                             p for p in chain.puts
-                            if 0.85 <= float(p.strike) / price <= 0.95
-                            and 20 <= (p.expiration - today).days <= 55
-                            and p.bid > 0
+                            if 0.85 <= float(p.strike) / price <= 0.95 and _valid_put(p)
                         ]
                     if put_candidates:
                         if has_delta:
@@ -340,6 +367,8 @@ def scan_wheel_candidates(
                 reasons=reasons,
                 collateral_per_contract=collateral,
                 ann_yield=ann_yield,
+                market_cap=mcap,
+                next_earnings=next_earn,
             ))
 
         except Exception as e:
@@ -665,6 +694,10 @@ def format_local_briefing(
     regime_tag = {"attack": "ATTACK", "hold": "HOLD", "defend": "DEFEND", "crisis": "CRISIS"}
     lines: list[str] = []
 
+    # Defaults — overridden if portfolio_state is available
+    nlv = portfolio_state.net_liquidation if portfolio_state else Decimal("0")
+    cash = portfolio_state.cash_available if portfolio_state else Decimal("0")
+
     # Header — compact, regime baked in
     regime_name = regime_tag.get(regime.regime, regime.regime.upper())
     regime_colors = {"ATTACK": _C.green, "HOLD": _C.yellow, "DEFEND": _C.red, "CRISIS": _C.red}
@@ -692,6 +725,33 @@ def format_local_briefing(
         lines.append(f"  📊 YTD P&L: {net_fn(f'${net_ytd:+,.0f}')} "
                      f"| Premium: {_C.green(f'${tax_engine.option_premium_income_ytd:,.0f}')}")
     lines.append(f"{'=' * 44}")
+
+    # ── Portfolio exposure map — used by all sections for concentration checks ──
+    # Aggregates all positions (stock + options collateral) by symbol as % of NLV
+    _symbol_exposure: dict[str, float] = {}  # symbol → total exposure in dollars
+    _symbol_option_count: dict[str, int] = {}  # symbol → number of open option positions
+    if portfolio_state and portfolio_state.positions and nlv > 0:
+        for pos in portfolio_state.positions:
+            sym = pos.symbol
+            if pos.position_type == "long_stock":
+                val = float(pos.underlying_price) * pos.quantity
+                _symbol_exposure[sym] = _symbol_exposure.get(sym, 0) + val
+            elif pos.option_type:  # any option position
+                # Collateral estimate: strike * 100 * quantity for short options
+                if "short" in pos.position_type:
+                    val = float(pos.strike) * 100 * pos.quantity
+                else:
+                    val = float(pos.market_value) if pos.market_value else 0
+                _symbol_exposure[sym] = _symbol_exposure.get(sym, 0) + val
+                _symbol_option_count[sym] = _symbol_option_count.get(sym, 0) + 1
+    _nlv_f = float(nlv) if nlv > 0 else 1.0
+
+    def _over_concentration(sym: str, threshold: float = 0.10) -> bool:
+        """Check if a symbol already exceeds the given NLV threshold.
+
+        Default 10% matches CLAUDE.md rule: 'NEVER exceed 10% NLV in any single name'.
+        """
+        return _symbol_exposure.get(sym, 0) / _nlv_f > threshold
 
     # ── DO NOW — urgent position actions + high conviction trades ──
     # Collect urgent items
@@ -738,6 +798,14 @@ def format_local_briefing(
                         lines.append(f"          !! {w}")
 
         for r in high_trades:
+            # Skip if symbol already has >= 3 option positions open
+            if _symbol_option_count.get(r.symbol, 0) >= 3:
+                continue
+            # Skip if adding this trade would push symbol over 10% NLV
+            new_exposure = float(r.strike) * 100 * r.contracts
+            if (_symbol_exposure.get(r.symbol, 0) + new_exposure) / _nlv_f > 0.10:
+                continue
+
             exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
             delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
             tv_str = ""
@@ -787,6 +855,13 @@ def format_local_briefing(
         lines.append(f"\n💡 {_C.blue(_C.bold('CONSIDER'))}")
 
         for r in medium_trades + low_trades:
+            # Same concentration / position-cap guards as DO NOW
+            if _symbol_option_count.get(r.symbol, 0) >= 3:
+                continue
+            new_exposure = float(r.strike) * 100 * r.contracts
+            if (_symbol_exposure.get(r.symbol, 0) + new_exposure) / _nlv_f > 0.10:
+                continue
+
             exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
             delta_str = f" | delta {r.smart_strike.delta:.2f}" if r.smart_strike else ""
             tv_str = ""
@@ -815,6 +890,12 @@ def format_local_briefing(
             lines.append(f"      {r.reasoning}")
 
     # ── OPPORTUNITIES — proactive deployment recommendations ──
+    # Symbols being closed/rolled in DO NOW — don't recommend re-opening
+    _closing_symbols: set[str] = set()
+    for p in urgent_positions:
+        if p.action == "CLOSE NOW":
+            _closing_symbols.add(p.symbol)
+
     # Evaluate watchlist names NOT already covered by signal-driven recommendations
     rec_symbols: set[str] = set()
     if recommendations:
@@ -822,9 +903,6 @@ def format_local_briefing(
 
     # (symbol, type, reason, details, option_contract_or_None)
     opportunities: list[tuple[str, str, str, list[str], "OptionContract | None"]] = []
-
-    cash = portfolio_state.cash_available if portfolio_state else Decimal("0")
-    nlv = portfolio_state.net_liquidation if portfolio_state else Decimal("0")
 
     # TV consensus and options intel by symbol
     tv_by_sym: dict[str, str] = {}
@@ -840,6 +918,18 @@ def format_local_briefing(
         if symbol in rec_symbols:
             continue  # already has a signal-driven recommendation
 
+        # Don't recommend opening what we're closing in DO NOW
+        if symbol in _closing_symbols:
+            continue
+
+        # Skip names already over-concentrated (>5% NLV)
+        if _over_concentration(symbol):
+            continue
+
+        # ADBE: reducing concentration per policy — don't add more
+        if symbol == "ADBE":
+            continue
+
         tv = tv_by_sym.get(symbol, "")
         rsi = hist.rsi_14
         price = float(mkt.price) if mkt.price else 0
@@ -853,9 +943,11 @@ def format_local_briefing(
         if rsi is not None and rsi > 65:
             continue
 
-        # Skip if earnings within 14 days (don't open new through earnings)
-        if cal.next_earnings and cal.next_earnings <= date.today() + timedelta(days=14):
+        # Skip if earnings within 7 days (don't open anything near earnings)
+        if cal.next_earnings and cal.next_earnings <= date.today() + timedelta(days=7):
             continue
+        # Note: further earnings check happens when selecting put candidates —
+        # we only recommend puts that expire BEFORE earnings.
 
         details: list[str] = []
         score = 0  # higher = more attractive
@@ -943,13 +1035,14 @@ def format_local_briefing(
         # For SELL PUT, find the best put contract from the chain
         best_put = None
         if rec_type == "SELL PUT" and chain and chain.puts:
-            # Target: 0.20-0.30 delta, 30-45 DTE
+            # Target: 0.20-0.30 delta, 30-45 DTE, expires BEFORE earnings
             today = date.today()
             candidates = [
                 p for p in chain.puts
                 if 0.10 <= abs(p.delta) <= 0.35
                 and 20 <= (p.expiration - today).days <= 55
                 and p.bid > 0
+                and not (cal.next_earnings and p.expiration >= cal.next_earnings)
             ]
             if candidates:
                 # Prefer closest to 0.25 delta in the 30-45 DTE range
@@ -958,6 +1051,9 @@ def format_local_briefing(
                     key=lambda p: (abs(abs(p.delta) - 0.25) + abs((p.expiration - today).days - 37) / 100)
                 )
 
+        # Skip SELL PUT if we couldn't find a valid contract (e.g., all expire after earnings)
+        if rec_type == "SELL PUT" and not best_put:
+            continue
         if rec_type:
             opportunities.append((symbol, rec_type, reason, details, best_put))
 
@@ -965,41 +1061,64 @@ def format_local_briefing(
     opportunities.sort(key=lambda x: len(x[3]), reverse=True)
 
     # ── Reallocation candidates: underperforming stock that could be redeployed ──
+    _INDEX_ETFS = {"VOO", "SPY", "IWM", "QQQ", "SMH", "DIA", "VTI", "SCHD"}
     realloc_candidates: list[tuple[str, int, Decimal, Decimal, float, str]] = []
-    # (symbol, shares, cost_basis, current_price, pnl_pct, reason)
+    # (symbol, shares, cost_basis_per_share, current_price, pnl_pct, reason)
+
+    # Aggregate stock positions by symbol first (handles split lots across accounts)
+    _agg_stocks: dict[str, dict] = {}
     if portfolio_state and portfolio_state.positions:
         for pos in portfolio_state.positions:
             if pos.position_type != "long_stock" or pos.quantity < 1:
                 continue
-            if pos.underlying_price <= 0:
-                continue
-            # cost_basis may be total (all shares) or per-share — normalize
-            if pos.cost_basis <= 0:
-                continue
-            per_share_cost = pos.cost_basis
-            if pos.quantity > 1 and per_share_cost > pos.underlying_price * 3:
-                # Likely total cost basis, not per-share — normalize
-                per_share_cost = pos.cost_basis / pos.quantity
-            if per_share_cost <= 0:
-                continue
-            pnl_pct = float((pos.underlying_price - per_share_cost) / per_share_cost)
-            sym_tv = tv_by_sym.get(pos.symbol, "")
+            sym = pos.symbol
+            if sym not in _agg_stocks:
+                _agg_stocks[sym] = {"quantity": 0, "total_cost": Decimal("0"),
+                                    "price": pos.underlying_price}
+            _agg_stocks[sym]["quantity"] += pos.quantity
+            # Normalize per-share cost basis
+            cb = pos.cost_basis
+            if pos.quantity > 1 and cb > pos.underlying_price * 3:
+                cb = cb / pos.quantity
+            _agg_stocks[sym]["total_cost"] += cb * pos.quantity
+            # Use latest price seen
+            if pos.underlying_price > 0:
+                _agg_stocks[sym]["price"] = pos.underlying_price
 
-            # Find underperformers: down significantly OR bearish consensus
-            reason_parts: list[str] = []
-            if pnl_pct < -0.15:
-                reason_parts.append(f"down {pnl_pct:.0%} from cost basis")
-            elif pnl_pct < -0.05 and sym_tv in ("SELL", "STRONG_SELL"):
-                reason_parts.append(f"down {pnl_pct:.0%}, TV {sym_tv}")
-            # Small position that can't run the wheel (< 100 shares, not near 100)
-            if pos.quantity < 100 and pos.quantity < 90:
-                reason_parts.append(f"only {pos.quantity} shares — can't sell covered calls")
+    for sym, agg in _agg_stocks.items():
+        if sym in _INDEX_ETFS:
+            continue
+        qty = agg["quantity"]
+        cur_price = agg["price"]
+        if cur_price <= 0 or qty < 1:
+            continue
+        total_cost = agg["total_cost"]
+        if total_cost <= 0:
+            continue
+        per_share_cost = total_cost / qty
+        pnl_pct = float((cur_price - per_share_cost) / per_share_cost)
 
-            if reason_parts:
-                realloc_candidates.append((
-                    pos.symbol, pos.quantity, per_share_cost,
-                    pos.underlying_price, pnl_pct, " | ".join(reason_parts),
-                ))
+        # Skip profitable winners — don't sell what's working
+        if pnl_pct > 0.15:
+            continue
+
+        sym_tv = tv_by_sym.get(sym, "")
+
+        # Find underperformers: down significantly OR bearish consensus
+        reason_parts: list[str] = []
+        if pnl_pct < -0.15:
+            reason_parts.append(f"down {pnl_pct:.0%} from cost basis")
+        elif pnl_pct < -0.05 and sym_tv in ("SELL", "STRONG_SELL"):
+            reason_parts.append(f"down {pnl_pct:.0%}, TV {sym_tv}")
+        # Small position that can't run the wheel (< 100 shares, not near 100)
+        if qty < 100 and qty < 90:
+            reason_parts.append(f"only {qty} shares — can't sell covered calls")
+
+        if reason_parts:
+            realloc_candidates.append((
+                sym, qty, per_share_cost,
+                cur_price, pnl_pct, " | ".join(reason_parts),
+            ))
 
     # Sort by worst performer first
     realloc_candidates.sort(key=lambda x: x[4])
@@ -1013,6 +1132,18 @@ def format_local_briefing(
                 (w for w in watchlist_data if w[0] == symbol), (None,)*5
             )
             price = float(mkt.price) if mkt else 0
+
+            # Skip low-yield puts — not worth the collateral
+            ann_yield = 0.0
+            if rec_type == "SELL PUT" and put_contract:
+                dte = (put_contract.expiration - date.today()).days
+                strike_f = float(put_contract.strike)
+                mid = float(put_contract.mid)
+                if strike_f > 0 and dte > 0:
+                    yield_on_cap = (mid / strike_f) * 100
+                    ann_yield = yield_on_cap * (365 / dte)
+                if ann_yield < 25:
+                    continue  # not enough premium to justify tying up capital
 
             if rec_type == "BUY 100 SHARES":
                 type_label = f"🟩 {_C.green('BUY 100 SHARES')}"
@@ -1030,7 +1161,6 @@ def format_local_briefing(
                 bid = float(put_contract.bid)
                 strike_f = float(put_contract.strike)
                 yield_on_cap = (mid / strike_f) * 100 if strike_f > 0 else 0
-                ann_yield = yield_on_cap * (365 / dte) if dte > 0 else 0
                 lines.append(
                     f"    {_C.bold('Strike')}: ${put_contract.strike} "
                     f"| {_C.bold('Exp')}: {put_contract.expiration.strftime('%b %d')} ({dte}d) "
@@ -1042,7 +1172,7 @@ def format_local_briefing(
                     f"| Yield: {yield_on_cap:.1f}% ({ann_yield:.0f}% ann)"
                 )
 
-            # Sizing: 1.5% NLV target, hard cap at 5% NLV
+            # Sizing: 1.5% NLV target, hard cap at 5% NLV, max 10 contracts
             if nlv > 0:
                 target_alloc = float(nlv) * 0.015
                 max_alloc = float(nlv) * 0.05
@@ -1055,6 +1185,7 @@ def format_local_briefing(
                 elif put_contract:
                     strike_f = float(put_contract.strike)
                     contracts = max(1, int(target_alloc / (strike_f * 100))) if strike_f > 0 else 1
+                    contracts = min(contracts, 10)  # hard cap — no 56x WTI situations
                     collateral = Decimal(contracts) * put_contract.strike * 100
                     # Cap at 5% NLV
                     while float(collateral) > max_alloc and contracts > 1:
@@ -1069,6 +1200,7 @@ def format_local_briefing(
                 else:
                     # SELL PUT without chain data — fallback to price-based estimate
                     contracts = max(1, int(target_alloc / (price * 100))) if price > 0 else 1
+                    contracts = min(contracts, 10)
                     collateral = contracts * price * 100
                     lines.append(f"    Size: ~{contracts}x puts (${collateral:,.0f} collateral, "
                                  f"~{collateral / float(nlv):.1%} NLV)")
@@ -1085,11 +1217,41 @@ def format_local_briefing(
         for pick in scanner_picks:
             if shown >= 6:
                 break
+            # Price floor — scanner cache may contain stale symbols that dropped
+            if pick.price < 5:
+                continue
             # Skip if even 1 contract exceeds 5% NLV
             if pick.collateral_per_contract > max_alloc_scanner:
                 continue
+            # Skip if already concentrated in this name
+            if _over_concentration(pick.symbol):
+                continue
+            # Don't recommend what we're closing in DO NOW
+            if pick.symbol in _closing_symbols:
+                continue
+            # Bid-ask spread check — skip illiquid options
+            if pick.put_contract:
+                pc_bid = float(pick.put_contract.bid)
+                pc_ask = float(pick.put_contract.ask)
+                pc_mid = float(pick.put_contract.mid)
+                if pc_bid > 0 and pc_ask > 0 and pc_mid > 0:
+                    spread_pct = (pc_ask - pc_bid) / pc_mid
+                    if spread_pct > 0.50:
+                        continue  # too wide — illiquid options
+
+            # Tier label from market cap
+            if pick.market_cap >= 10_000_000_000:
+                tier = "T1"
+            elif pick.market_cap >= 2_000_000_000:
+                tier = "T2"
+            elif pick.market_cap > 0:
+                tier = "T3"
+            else:
+                tier = ""
+            tier_str = f" [{tier}]" if tier else ""
+
             shown += 1
-            lines.append(f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(pick.symbol)} @ ${pick.price:,.2f}")
+            lines.append(f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(pick.symbol)}{tier_str} @ ${pick.price:,.2f}")
             lines.append(f"    {' | '.join(pick.reasons)}")
             if pick.put_contract:
                 pc = pick.put_contract
@@ -1115,6 +1277,7 @@ def format_local_briefing(
                 if pick.put_contract:
                     strike_f = float(pick.put_contract.strike)
                     contracts = max(1, int(target_alloc / (strike_f * 100))) if strike_f > 0 else 1
+                    contracts = min(contracts, 10)
                     collateral = Decimal(contracts) * pick.put_contract.strike * 100
                     while float(collateral) > max_alloc and contracts > 1:
                         contracts -= 1
@@ -1127,6 +1290,7 @@ def format_local_briefing(
                     )
                 else:
                     contracts = max(1, int(target_alloc / (pick.price * 100))) if pick.price > 0 else 1
+                    contracts = min(contracts, 10)
                     coll = contracts * pick.price * 100
                     lines.append(f"    Size: ~{contracts}x puts (${coll:,.0f} collateral, "
                                  f"~{coll / float(nlv):.1%} NLV)")
@@ -1496,17 +1660,17 @@ async def run_analysis_cycle(
     )
     print(briefing)
 
-    # Push to Telegram if configured
-    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
-    if tg_token and tg_chat and always_push:
-        try:
-            plain = _strip_ansi(briefing)
-            from src.delivery.telegram_bot import send_briefing
-            await send_briefing(plain)
-            log.info("telegram_briefing_sent", cycle=cycle_name)
-        except Exception as e:
-            log.warning("telegram_send_failed", error=str(e))
+    # Telegram disabled — running locally for now
+    # tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    # tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    # if tg_token and tg_chat and always_push:
+    #     try:
+    #         plain = _strip_ansi(briefing)
+    #         from src.delivery.telegram_bot import send_briefing
+    #         await send_briefing(plain)
+    #         log.info("telegram_briefing_sent", cycle=cycle_name)
+    #     except Exception as e:
+    #         log.warning("telegram_send_failed", error=str(e))
 
     result = {
         "cycle": cycle_name,

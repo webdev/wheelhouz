@@ -152,7 +152,7 @@ stocks:
     cost_basis: 9.12
 
   - symbol: PLTR
-    quantity: 752
+    quantity: 700
     cost_basis: 109.50
 
   - symbol: SMH

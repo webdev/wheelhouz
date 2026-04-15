@@ -31,6 +31,28 @@ _HIGH_IV_THRESHOLD = 60        # IV rank above this = high IV environment
 _MAX_RISK_REWARD = 3.0         # block rolls where 10% drop loss > 3x premium
 _LARGE_PROFIT_THRESHOLD = Decimal("2000")  # flag positions with $2K+ captured
 
+
+def _snap_to_expiration(target: date, chain: OptionsChain | None) -> date:
+    """Snap a computed date to the nearest real options expiration.
+
+    Uses chain.expirations if available. Falls back to snapping to the
+    nearest Friday (standard options expiration day).
+    """
+    if chain and chain.expirations:
+        # Find the nearest expiration on or after the target date
+        future_exps = [e for e in chain.expirations if e >= target]
+        if future_exps:
+            return min(future_exps)
+        # All expirations are before target — pick the latest one
+        return max(chain.expirations)
+
+    # Fallback: snap to the nearest Friday
+    days_until_friday = (4 - target.weekday()) % 7  # 4 = Friday
+    if days_until_friday == 0:
+        return target
+    return target + __import__("datetime").timedelta(days=days_until_friday)
+
+
 # Stocks that routinely move 10%+ on earnings — stronger close recommendation
 _HIGH_VOL_EARNINGS_MOVERS = frozenset({
     "TSLA", "NVDA", "META", "NFLX", "SNAP", "ROKU", "SHOP", "COIN",
@@ -156,10 +178,17 @@ def _build_roll(
     if current_price <= 0:
         return None
 
-    # Earnings check: if earnings fall within the default 30-day window,
-    # push the roll target to AFTER the earnings report instead of blocking.
+    # Roll target must be AFTER the current position's expiration.
+    # Start from whichever is later: 30 days from now, or 1 day after
+    # current expiration (a roll by definition goes to a later date).
     earnings_date = context.events.next_earnings if context.events else None
-    new_exp_date = date.today() + timedelta(days=30)
+    default_target = date.today() + timedelta(days=30)
+    if position.expiration and default_target <= position.expiration:
+        default_target = position.expiration + timedelta(days=1)
+
+    new_exp_date = default_target
+    # Earnings check: if earnings fall within the target window,
+    # push the roll target to AFTER the earnings report instead of blocking.
     earnings_in_window = (
         earnings_date is not None
         and earnings_date <= new_exp_date
@@ -168,12 +197,25 @@ def _build_roll(
         # Target 30 days AFTER earnings — roll past the report
         new_exp_date = earnings_date + timedelta(days=30)
 
+    # Snap to a real options expiration (nearest Friday or chain expiration)
+    new_exp_date = _snap_to_expiration(new_exp_date, chain)
+
+    # Final guard: the snapped date must be after current expiration.
+    # (Snap could land on the same date if chain has no later expirations.)
+    if position.expiration and new_exp_date <= position.expiration:
+        logger.info("roll_blocked", symbol=position.symbol,
+                    reason="no_later_expiration_available",
+                    current_exp=str(position.expiration),
+                    target_exp=str(new_exp_date))
+        return None
+
     if position.position_type == "short_put":
         # Never roll a put to a higher strike — that's closer to ATM,
         # more assignment risk. Only roll down (lower strike) or same strike out.
         contract = _pick_put_roll_target(
             chain, current_price, iv_rank,
             max_strike=float(position.strike),
+            target_expiration=new_exp_date,
         )
 
         if contract:
@@ -240,6 +282,7 @@ def _build_roll(
         contract = _pick_call_roll_target(
             chain, current_price, iv_rank,
             min_strike=float(position.strike),
+            target_expiration=new_exp_date,
         )
 
         if contract:
@@ -313,6 +356,7 @@ def _build_roll(
 def _pick_put_roll_target(
     chain: OptionsChain | None, current_price: float, iv_rank: float,
     max_strike: float = float("inf"),
+    target_expiration: date | None = None,
 ) -> object | None:
     """Pick the best OTM put for a roll based on delta and IV environment.
 
@@ -322,6 +366,9 @@ def _pick_put_roll_target(
 
     High IV → go further OTM (lower delta) to reduce assignment risk.
     Normal IV → target the wheel sweet spot (0.20-0.25 delta).
+
+    When target_expiration is given, only considers contracts at that
+    expiration so the displayed date matches the actual contract.
     """
     if not chain or not chain.puts:
         return None
@@ -334,26 +381,29 @@ def _pick_put_roll_target(
         target_delta = _PUT_DELTA_TARGET
         max_delta = _PUT_DELTA_MAX
 
-    # Filter: OTM puts with real bids, acceptable delta, at or below current strike
-    candidates = [
+    # Base filter: OTM, has bid, at or below current strike
+    base = [
         p for p in chain.puts
         if float(p.strike) < current_price
         and float(p.strike) <= max_strike
         and p.bid > 0
-        and 0.05 <= abs(p.delta) <= max_delta
+    ]
+
+    # Filter to target expiration when specified
+    if target_expiration:
+        base = [p for p in base if p.expiration == target_expiration]
+
+    if not base:
+        return None
+
+    # Prefer contracts within delta range
+    candidates = [
+        p for p in base
+        if 0.05 <= abs(p.delta) <= max_delta
     ]
 
     if not candidates:
-        # Relax delta filter but keep OTM + has bid + at or below current strike
-        candidates = [
-            p for p in chain.puts
-            if float(p.strike) < current_price
-            and float(p.strike) <= max_strike
-            and p.bid > 0
-        ]
-
-    if not candidates:
-        return None
+        candidates = base
 
     # Pick nearest to target delta
     return min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
@@ -362,12 +412,16 @@ def _pick_put_roll_target(
 def _pick_call_roll_target(
     chain: OptionsChain | None, current_price: float, iv_rank: float,
     min_strike: float = 0.0,
+    target_expiration: date | None = None,
 ) -> object | None:
     """Pick the best OTM call for a covered call roll.
 
     Never rolls down — min_strike ensures the new strike is at or above
     the current position's strike. Rolling a call to a lower strike
     increases assignment risk and costs a big debit.
+
+    When target_expiration is given, only considers contracts at that
+    expiration so the displayed date matches the actual contract.
     """
     if not chain or not chain.calls:
         return None
@@ -375,25 +429,29 @@ def _pick_call_roll_target(
     target_delta = 0.25 if iv_rank <= _HIGH_IV_THRESHOLD else 0.18
     max_delta = 0.35
 
-    candidates = [
+    # Base filter: OTM, has bid, at or above current strike
+    base = [
         c for c in chain.calls
         if float(c.strike) > current_price
         and float(c.strike) >= min_strike
         and c.bid > 0
-        and 0.05 <= abs(c.delta) <= max_delta
+    ]
+
+    # Filter to target expiration when specified
+    if target_expiration:
+        base = [c for c in base if c.expiration == target_expiration]
+
+    if not base:
+        return None
+
+    # Prefer contracts within delta range
+    candidates = [
+        c for c in base
+        if 0.05 <= abs(c.delta) <= max_delta
     ]
 
     if not candidates:
-        # Relax delta filter but keep OTM + above current strike
-        candidates = [
-            c for c in chain.calls
-            if float(c.strike) > current_price
-            and float(c.strike) >= min_strike
-            and c.bid > 0
-        ]
-
-    if not candidates:
-        return None
+        candidates = base
 
     return min(candidates, key=lambda c: abs(abs(c.delta) - target_delta))
 

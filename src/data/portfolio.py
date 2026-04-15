@@ -99,13 +99,28 @@ def load_portfolio_from_yaml(path: Path | None = None) -> PortfolioState:
             option_type=opt_type,
         ))
 
-    # Estimate NLV from stock positions
+    # Stock positions — needed for covered call eligibility + reallocation
     total_stock_value = Decimal("0")
     concentration: dict[str, float] = {}
     for stk in data.get("stocks", []):
-        # Use cost basis as proxy — real price comes from market data
-        value = Decimal(str(stk["cost_basis"])) * stk["quantity"]
+        qty = stk["quantity"]
+        cost_per_share = Decimal(str(stk["cost_basis"]))
+        value = cost_per_share * qty
         total_stock_value += value
+        positions.append(Position(
+            symbol=stk["symbol"],
+            position_type="long_stock",
+            quantity=qty,
+            strike=Decimal("0"),
+            expiration=None,
+            entry_price=cost_per_share,
+            current_price=cost_per_share,  # updated by market data later
+            underlying_price=cost_per_share,
+            cost_basis=value,
+            delta=0.0, theta=0.0, gamma=0.0, vega=0.0, iv=0.0,
+            days_to_expiry=0,
+            option_type="",
+        ))
 
     nlv = float(total_stock_value) if total_stock_value > 0 else 1_000_000.0
 
@@ -119,9 +134,13 @@ def load_portfolio_from_yaml(path: Path | None = None) -> PortfolioState:
                 stocks=len(data.get("stocks", [])),
                 estimated_nlv=round(nlv))
 
+    cash = Decimal(str(data.get("cash", 0)))
+    total_value = Decimal(str(data.get("total_value", nlv)))
+
     return PortfolioState(
         positions=positions,
-        net_liquidation=Decimal(str(round(nlv))),
+        cash_available=cash,
+        net_liquidation=total_value if total_value > 0 else Decimal(str(round(nlv))),
         concentration=concentration,
     )
 

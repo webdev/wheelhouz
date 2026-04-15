@@ -263,3 +263,93 @@ class TestBenchBuilder:
         )
         assert actionable is False
         assert reason is None
+
+
+from tests.fixtures import make_sized_opportunity
+
+
+class TestConvictionModifier:
+    def _make_entry(self, rating: str, tier: int, stale: bool = False) -> ShoppingListEntry:
+        return ShoppingListEntry(
+            name="Test Corp",
+            ticker="TEST",
+            rating=rating,
+            rating_tier=tier,
+            date_updated=date(2026, 4, 1),
+            price_target_2026=(Decimal("100"), Decimal("120")),
+            price_target_2027=None,
+            stale=stale,
+        )
+
+    def test_top_stock_upgrades_by_2(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="low", symbol="TEST")
+        entry = self._make_entry("Top Stock to Buy", 5)
+        result, label = _apply_shopping_list_adjustment(sized, {"TEST": entry})
+        assert result.conviction == "high"
+        assert "Upgraded" in label
+        assert "Parkev" in label
+
+    def test_top_15_upgrades_by_1(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="medium", symbol="TEST")
+        entry = self._make_entry("Top 15 Stock", 4)
+        result, label = _apply_shopping_list_adjustment(sized, {"TEST": entry})
+        assert result.conviction == "high"
+        assert "Top 15" in label
+
+    def test_buy_no_change(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="medium", symbol="TEST")
+        entry = self._make_entry("Buy", 3)
+        result, label = _apply_shopping_list_adjustment(sized, {"TEST": entry})
+        assert result.conviction == "medium"
+        assert label is None
+
+    def test_hold_downgrades_by_1(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="high", symbol="TEST")
+        entry = self._make_entry("Hold/ Market Perform", 1)
+        result, label = _apply_shopping_list_adjustment(sized, {"TEST": entry})
+        assert result.conviction == "medium"
+        assert "Downgraded" in label
+
+    def test_sell_downgrades_with_warning(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="medium", symbol="TEST")
+        entry = self._make_entry("Sell", 0)
+        result, label = _apply_shopping_list_adjustment(sized, {"TEST": entry})
+        assert result.conviction == "low"
+        assert "Sell-rated" in label
+
+    def test_stale_entry_no_adjustment(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="low", symbol="TEST")
+        entry = self._make_entry("Top Stock to Buy", 5, stale=True)
+        result, label = _apply_shopping_list_adjustment(sized, {"TEST": entry})
+        assert result.conviction == "low"  # unchanged
+        assert label is None
+
+    def test_not_in_list_no_change(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="medium", symbol="UNKNOWN")
+        result, label = _apply_shopping_list_adjustment(sized, {})
+        assert result.conviction == "medium"
+        assert label is None
+
+    def test_high_stays_high_on_upgrade(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="high", symbol="TEST")
+        entry = self._make_entry("Top Stock to Buy", 5)
+        result, label = _apply_shopping_list_adjustment(sized, {"TEST": entry})
+        assert result.conviction == "high"  # already max
+        assert label is None  # no change = no label
+
+    def test_low_stays_low_on_downgrade_sell(self) -> None:
+        from src.main import _apply_shopping_list_adjustment
+        sized = make_sized_opportunity(conviction="low", symbol="TEST")
+        entry = self._make_entry("Sell", 0)
+        result, label = _apply_shopping_list_adjustment(sized, {"TEST": entry})
+        # Sell on low → still low (can't go to skip via shopping list)
+        assert result.conviction == "low"
+        assert label is None  # no actual change

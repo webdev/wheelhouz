@@ -42,6 +42,7 @@ from src.intelligence.position_review import PositionReview, review_position, fo
 from src.data.portfolio import load_portfolio_state
 from src.delivery.reasoning import generate_analyst_brief
 from src.models.intelligence import IntelligenceContext
+from src.models.shopping_list import ShoppingListEntry
 
 log = structlog.get_logger()
 
@@ -390,6 +391,7 @@ def build_recommendations(
     watchlist_data: list[tuple[str, MarketContext, PriceHistory, OptionsChain, EventCalendar]],
     portfolio: PortfolioState | None = None,
     intel_contexts: list[IntelligenceContext] | None = None,
+    shopping_list: dict[str, ShoppingListEntry] | None = None,
 ) -> list[SizedOpportunity]:
     """Build trade recommendations: puts on dips, calls on strength.
 
@@ -472,6 +474,10 @@ def build_recommendations(
         if tv_overall:
             sized = _apply_tv_adjustment(sized, tv_overall)
 
+        # Shopping list conviction adjustment
+        if shopping_list:
+            sized, _ = _apply_shopping_list_adjustment(sized, shopping_list)
+
         if sized.conviction != "skip" and sized.contracts > 0:
             recommendations.append(sized)
             sized_symbols.add(symbol)
@@ -520,6 +526,10 @@ def build_recommendations(
         tv_overall = tv_by_symbol.get(symbol)
         if tv_overall:
             sized = _apply_tv_adjustment(sized, tv_overall)
+
+        # Shopping list conviction adjustment
+        if shopping_list:
+            sized, _ = _apply_shopping_list_adjustment(sized, shopping_list)
 
         if sized.conviction != "skip" and sized.contracts > 0:
             recommendations.append(sized)
@@ -573,6 +583,11 @@ def build_recommendations(
                     f"{max_contracts}x ${best.strike}C on {shares} shares."
                 ),
             ))
+            # Shopping list conviction adjustment (TV-only calls have no TV adj step)
+            if shopping_list:
+                recommendations[-1], _ = _apply_shopping_list_adjustment(
+                    recommendations[-1], shopping_list
+                )
             sized_symbols.add(symbol)
 
     # Sort: high > medium > low, then by annualized yield descending
@@ -616,6 +631,66 @@ def _apply_tv_adjustment(sized: SizedOpportunity, tv_overall: str) -> SizedOppor
     sized.conviction = new_conviction
     sized.reasoning += tv_note
     return sized
+
+
+def _apply_shopping_list_adjustment(
+    sized: SizedOpportunity,
+    shopping_list: dict[str, ShoppingListEntry],
+) -> tuple[SizedOpportunity, str | None]:
+    """Adjust conviction based on shopping list rating.
+
+    Applied after TV adjustment. Stale entries (>90 days) are neutralized.
+    Returns (sized_opportunity, label_or_none).
+    """
+    entry = shopping_list.get(sized.symbol)
+    if not entry:
+        return sized, None
+
+    # Stale guard: no adjustment for old ratings
+    if entry.stale:
+        return sized, None
+
+    current_idx = (
+        _CONVICTION_LEVELS.index(sized.conviction)
+        if sized.conviction in _CONVICTION_LEVELS
+        else 1
+    )
+    original = sized.conviction
+
+    tier = entry.rating_tier
+    if tier == 5:
+        new_idx = min(len(_CONVICTION_LEVELS) - 1, current_idx + 2)
+    elif tier == 4:
+        new_idx = min(len(_CONVICTION_LEVELS) - 1, current_idx + 1)
+    elif tier in (3, 2):
+        return sized, None  # Buy and Borderline Buy: no change
+    elif tier == 1:
+        new_idx = max(1, current_idx - 1)  # floor at low, not skip
+    elif tier == 0:
+        new_idx = max(1, current_idx - 1)  # floor at low, not skip
+    else:
+        return sized, None
+
+    new_conviction = _CONVICTION_LEVELS[new_idx]
+    if new_conviction == original:
+        return sized, None
+
+    sized.conviction = new_conviction
+
+    # Generate label
+    if tier == 5:
+        label = "\u2B06 Upgraded (Top Stock \u2014 Parkev)"
+    elif tier == 4:
+        label = "\u2B06 Upgraded (Top 15 Stock \u2014 Parkev)"
+    elif tier == 1:
+        label = "\u2B07 Downgraded (Hold \u2014 Parkev)"
+    elif tier == 0:
+        label = "\u26A0 Sell-rated (Parkev)"
+    else:
+        label = None
+
+    sized.conviction_label = label
+    return sized, label
 
 
 # ---------------------------------------------------------------------------

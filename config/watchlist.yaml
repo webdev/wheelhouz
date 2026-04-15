@@ -29,3 +29,45 @@ watchlist:
   - VOO
   - VRT
   - WDC
+
+# Scanner universe — broader pool screened for wheel candidates
+# High-IV mid/small-caps with liquid options, affordable collateral
+# Updated periodically. Scanner picks appear in OPPORTUNITIES section.
+scanner_universe:
+  # AI / Data center / Power
+  - IREN
+  - CORZ
+  - APLD
+  - CIFR
+  - BE
+  - RIOT
+  # Semis (non-mega)
+  - INTC
+  - MRVL
+  - ON
+  - WOLF
+  - ARM
+  # Energy / Commodities
+  - EQT
+  - FSLR
+  - ENPH
+  # Fintech / Growth
+  - HOOD
+  - AFRM
+  - SQ
+  - UPST
+  # Biotech / Healthcare
+  - MRNA
+  - CRSP
+  # EV / Auto
+  - RIVN
+  - LCID
+  - NIO
+  # Other high-IV wheel candidates
+  - SNAP
+  - PINS
+  - ROKU
+  - DKNG
+  - RBLX
+  - SMCI
+  - NET

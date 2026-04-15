@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+from dataclasses import dataclass
 from datetime import datetime, time, timezone
 from decimal import Decimal
 from typing import Any
@@ -25,7 +26,7 @@ logger = structlog.get_logger()
 from src.analysis.signals import detect_all_signals
 from src.analysis.sizing import size_position
 from src.analysis.strikes import find_smart_strikes
-from src.config.loader import load_watchlist
+from src.config.loader import load_watchlist, load_scanner_universe
 from src.data.events import fetch_event_calendar
 from src.data.market import fetch_market_context, fetch_options_chain, fetch_price_history
 from src.models.analysis import SizedOpportunity
@@ -165,6 +166,214 @@ def fetch_all_watchlist_data(
         except Exception as e:
             log.warning("symbol_fetch_failed", symbol=symbol, error=str(e))
     return results
+
+
+# ---------------------------------------------------------------------------
+# Wheel candidate scanner — screens broader universe for high-IV opportunities
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScannerPick:
+    """A wheel candidate found by the scanner."""
+    symbol: str
+    price: float
+    iv_rank: float
+    rsi: float | None
+    put_contract: Any | None  # OptionContract
+    score: float  # composite attractiveness score
+    reasons: list[str]
+    collateral_per_contract: float  # strike * 100
+    ann_yield: float  # annualized premium yield
+
+
+def scan_wheel_candidates(
+    watchlist_symbols: set[str],
+    etrade_session: object | None = None,
+    max_picks: int = 8,
+) -> list[ScannerPick]:
+    """Screen the scanner universe for high-IV wheel candidates.
+
+    Filters: IV rank >= 40, liquid options, price $5-$150 (affordable collateral),
+    RSI not overbought, no earnings within 14 days.
+    Returns top picks sorted by composite score (IV * yield * technicals).
+    """
+    import yfinance as yf
+    from src.data.market import calculate_iv_rank, _calculate_rsi
+
+    universe = load_scanner_universe()
+    if not universe:
+        return []
+
+    # Exclude symbols already on the watchlist
+    candidates = [s for s in universe if s not in watchlist_symbols]
+    if not candidates:
+        return []
+
+    log.info("scanner_screening", candidates=len(candidates))
+    picks: list[ScannerPick] = []
+
+    for symbol in candidates:
+        try:
+            ticker = yf.Ticker(symbol)
+            hist = ticker.history(period="3mo")
+            if hist.empty or len(hist) < 20:
+                continue
+
+            closes = [float(c) for c in hist["Close"]]
+            price = closes[-1]
+
+            # Price filter: $5-$150 for affordable collateral
+            if price < 5 or price > 150:
+                continue
+
+            # RSI filter: skip overbought
+            rsi = _calculate_rsi(closes)
+            if rsi is not None and rsi > 65:
+                continue
+
+            # IV rank from yfinance historical vol
+            iv_data = calculate_iv_rank(symbol, 0)  # 0 = use HV proxy
+            iv_rank = iv_data["iv_rank"]
+
+            # IV filter: need rich premium
+            if iv_rank < 40:
+                continue
+
+            # Earnings filter: skip if within 14 days
+            try:
+                cal_info = ticker.calendar
+                if cal_info is not None:
+                    # yfinance calendar format varies
+                    earnings_date = None
+                    if isinstance(cal_info, dict) and "Earnings Date" in cal_info:
+                        ed = cal_info["Earnings Date"]
+                        if isinstance(ed, list) and ed:
+                            earnings_date = ed[0]
+                        elif hasattr(ed, "date"):
+                            earnings_date = ed
+                    if earnings_date and hasattr(earnings_date, "date"):
+                        from datetime import date as date_type, timedelta
+                        days_to_er = (earnings_date.date() - date_type.today()).days
+                        if 0 < days_to_er < 14:
+                            continue
+            except Exception:
+                pass  # calendar not available, proceed
+
+            # Score: IV rank + RSI pullback + price efficiency
+            score = 0.0
+            reasons: list[str] = []
+
+            # IV attractiveness (main driver)
+            if iv_rank >= 70:
+                score += 4
+                reasons.append(f"IV rank {iv_rank:.0f} — premium rich")
+            elif iv_rank >= 55:
+                score += 3
+                reasons.append(f"IV rank {iv_rank:.0f} — elevated premium")
+            else:
+                score += 2
+                reasons.append(f"IV rank {iv_rank:.0f}")
+
+            # RSI pullback bonus
+            if rsi is not None and rsi < 30:
+                score += 3
+                reasons.append(f"RSI {rsi:.0f} — oversold")
+            elif rsi is not None and rsi <= 45:
+                score += 2
+                reasons.append(f"RSI {rsi:.0f} — pullback")
+
+            # Affordable collateral bonus (lower price = more contracts per dollar)
+            if price <= 25:
+                score += 2
+                reasons.append(f"${price:.0f} — low collateral per contract")
+            elif price <= 50:
+                score += 1
+
+            # Volume check (basic liquidity)
+            avg_vol = sum(hist["Volume"][-20:]) / 20 if len(hist) >= 20 else 0
+            if avg_vol < 500_000:
+                continue  # not liquid enough
+
+            # Try to get a put contract
+            put_contract = None
+            ann_yield = 0.0
+            collateral = price * 100
+            try:
+                if etrade_session:
+                    from src.data.broker import fetch_etrade_chain
+                    chain = fetch_etrade_chain(etrade_session, symbol, price)
+                else:
+                    chain = fetch_options_chain(symbol)
+
+                if chain and chain.puts:
+                    from datetime import date as date_type
+                    today = date_type.today()
+                    # E*Trade provides real delta; yfinance has delta=0.0
+                    # For yfinance, use strike distance as delta proxy:
+                    # ~0.25 delta ≈ strike 5-12% below current price
+                    has_delta = any(abs(p.delta) > 0.01 for p in chain.puts[:5])
+                    if has_delta:
+                        put_candidates = [
+                            p for p in chain.puts
+                            if 0.10 <= abs(p.delta) <= 0.35
+                            and 20 <= (p.expiration - today).days <= 55
+                            and p.bid > 0
+                        ]
+                    else:
+                        # Fallback: select by strike distance (5-15% OTM)
+                        put_candidates = [
+                            p for p in chain.puts
+                            if 0.85 <= float(p.strike) / price <= 0.95
+                            and 20 <= (p.expiration - today).days <= 55
+                            and p.bid > 0
+                        ]
+                    if put_candidates:
+                        if has_delta:
+                            put_contract = min(
+                                put_candidates,
+                                key=lambda p: (abs(abs(p.delta) - 0.25)
+                                               + abs((p.expiration - today).days - 37) / 100)
+                            )
+                        else:
+                            # Target ~8% OTM (approx 0.25 delta)
+                            put_contract = min(
+                                put_candidates,
+                                key=lambda p: abs(float(p.strike) / price - 0.92)
+                            )
+                        strike_f = float(put_contract.strike)
+                        mid = float(put_contract.mid)
+                        dte = (put_contract.expiration - today).days
+                        collateral = strike_f * 100
+                        if strike_f > 0 and dte > 0:
+                            yield_pct = (mid / strike_f) * 100
+                            ann_yield = yield_pct * (365 / dte)
+                            if ann_yield >= 20:
+                                score += 2
+                            elif ann_yield >= 10:
+                                score += 1
+            except Exception as e:
+                log.debug("scanner_chain_failed", symbol=symbol, error=str(e))
+
+            picks.append(ScannerPick(
+                symbol=symbol,
+                price=price,
+                iv_rank=iv_rank,
+                rsi=rsi,
+                put_contract=put_contract,
+                score=score,
+                reasons=reasons,
+                collateral_per_contract=collateral,
+                ann_yield=ann_yield,
+            ))
+
+        except Exception as e:
+            log.debug("scanner_symbol_failed", symbol=symbol, error=str(e))
+            continue
+
+    # Sort by score descending, then by annualized yield
+    picks.sort(key=lambda p: (p.score, p.ann_yield), reverse=True)
+    log.info("scanner_complete", picks=len(picks), screened=len(candidates))
+    return picks[:max_picks]
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +680,7 @@ def format_local_briefing(
     position_reviews: list[PositionReview] | None = None,
     tax_engine: Any | None = None,
     portfolio_state: Any | None = None,
+    scanner_picks: list[ScannerPick] | None = None,
 ) -> str:
     """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
     from datetime import date, timedelta
@@ -485,24 +695,27 @@ def format_local_briefing(
     regime_fn = regime_colors.get(regime_name, _C.yellow)
     spy_fn = _C.green if spy_change >= 0 else _C.red
 
-    lines.append(_C.dim(f"{'=' * 60}"))
-    lines.append(_C.bold(f"  WHEEL COPILOT — {today}"))
-    lines.append(f"  {regime_fn(regime_name)} "
+    regime_emoji = {"ATTACK": "🟢", "HOLD": "🟡", "DEFEND": "🟠", "CRISIS": "🔴"}
+    r_emoji = regime_emoji.get(regime_name, "🟡")
+
+    lines.append(f"{'=' * 44}")
+    lines.append(_C.bold(f"  🎡 WHEEL COPILOT — {today}"))
+    lines.append(f"  {r_emoji} {regime_fn(regime_name)} "
                  f"| VIX {vix:.1f} | SPY {spy_fn(f'{spy_change:+.2%}')}")
     if portfolio_state and portfolio_state.net_liquidation > 0:
         nlv = portfolio_state.net_liquidation
         cash = portfolio_state.cash_available
         deployed_pct = float((nlv - cash) / nlv) if nlv else 0
-        lines.append(f"  NLV: {_C.bold(f'${nlv:,.0f}')} "
+        lines.append(f"  💰 NLV: {_C.bold(f'${nlv:,.0f}')} "
                      f"| Cash: {_C.green(f'${cash:,.0f}')} "
                      f"| Deployed: {deployed_pct:.0%}")
     if tax_engine:
         net_ytd = (tax_engine.realized_stcg_ytd + tax_engine.realized_ltcg_ytd
                    - tax_engine.realized_losses_ytd)
         net_fn = _C.green if net_ytd >= 0 else _C.red
-        lines.append(f"  YTD Options P&L: {net_fn(f'${net_ytd:+,.0f}')} "
+        lines.append(f"  📊 YTD P&L: {net_fn(f'${net_ytd:+,.0f}')} "
                      f"| Premium: {_C.green(f'${tax_engine.option_premium_income_ytd:,.0f}')}")
-    lines.append(_C.dim(f"{'=' * 60}"))
+    lines.append(f"{'=' * 44}")
 
     # ── DO NOW — urgent position actions + high conviction trades ──
     # Collect urgent items
@@ -515,12 +728,15 @@ def format_local_briefing(
         high_trades = [r for r in recommendations if r.conviction == "high"]
 
     if urgent_positions or high_trades:
-        lines.append(f"\n{_C.red(_C.bold('━━ DO NOW ━━'))}")
+        lines.append(f"\n🚨 {_C.red(_C.bold('DO NOW'))}")
 
         for p in urgent_positions:
             pos_desc = _format_position_desc(p)
-            action_color = _C.red if p.action == "CLOSE NOW" else _C.green
-            lines.append(f"  {action_color(p.action)}: {_C.bold(pos_desc)}")
+            if p.action == "CLOSE NOW":
+                action_label = f"🛑 {_C.red('CLOSE NOW')}"
+            else:
+                action_label = f"✅ {_C.green('TAKE PROFIT')}"
+            lines.append(f"  {action_label}: {_C.bold(pos_desc)}")
             lines.append(f"    P&L: {_pnl_colored(p.current_pnl, p.pnl_pct)} | {p.days_to_expiry}d left")
             lines.append(f"    {p.reasoning}")
             if p.roll:
@@ -592,7 +808,7 @@ def format_local_briefing(
         low_trades = [r for r in recommendations if r.conviction == "low"]
 
     if medium_trades or low_trades:
-        lines.append(f"\n{_C.blue(_C.bold('━━ CONSIDER ━━'))}")
+        lines.append(f"\n💡 {_C.blue(_C.bold('CONSIDER'))}")
 
         for r in medium_trades + low_trades:
             exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
@@ -813,8 +1029,8 @@ def format_local_briefing(
     realloc_candidates.sort(key=lambda x: x[4])
 
     if opportunities and cash > 0:
-        lines.append(f"\n{_C.green(_C.bold('━━ OPPORTUNITIES ━━'))} "
-                     f"{_C.dim(f'— ${cash:,.0f} cash available')}")
+        lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
+                     f"— ${cash:,.0f} cash available")
 
         for symbol, rec_type, reason, details, put_contract in opportunities[:8]:
             _, mkt, hist, _, _ = next(
@@ -822,8 +1038,11 @@ def format_local_briefing(
             )
             price = float(mkt.price) if mkt else 0
 
-            type_fn = _C.green if rec_type == "BUY 100 SHARES" else _C.cyan
-            lines.append(f"  {type_fn(rec_type)}: {_C.bold(symbol)} @ ${price:,.2f}")
+            if rec_type == "BUY 100 SHARES":
+                type_label = f"🟩 {_C.green('BUY 100 SHARES')}"
+            else:
+                type_label = f"📝 {_C.cyan('SELL PUT')}"
+            lines.append(f"  {type_label}: {_C.bold(symbol)} @ ${price:,.2f}")
             lines.append(f"    {reason}")
             if details:
                 lines.append(f"    {' | '.join(details)}")
@@ -878,20 +1097,70 @@ def format_local_briefing(
                     lines.append(f"    Size: ~{contracts}x puts (${collateral:,.0f} collateral, "
                                  f"~{collateral / float(nlv):.1%} NLV)")
 
+    # ── SCANNER PICKS — high-IV wheel candidates from broader universe ──
+    if scanner_picks:
+        if not opportunities:
+            # No watchlist opportunities — scanner gets its own header
+            lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
+                         f"— ${cash:,.0f} cash available")
+        lines.append(f"\n  🔍 {_C.bold('SCANNER PICKS')} — high-IV names outside your watchlist")
+        for pick in scanner_picks[:6]:
+            lines.append(f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(pick.symbol)} @ ${pick.price:,.2f}")
+            lines.append(f"    {' | '.join(pick.reasons)}")
+            if pick.put_contract:
+                pc = pick.put_contract
+                dte = (pc.expiration - date.today()).days
+                delta_str = f" | {_C.bold('Delta')}: {abs(pc.delta):.2f}" if abs(pc.delta) > 0.01 else ""
+                otm_pct = (1 - float(pc.strike) / pick.price) * 100 if pick.price > 0 else 0
+                lines.append(
+                    f"    {_C.bold('Strike')}: ${pc.strike} ({otm_pct:.0f}% OTM) "
+                    f"| {_C.bold('Exp')}: {pc.expiration.strftime('%b %d')} ({dte}d) "
+                    f"| {_C.bold('Bid')}: ${float(pc.bid):.2f}"
+                    f"{delta_str}"
+                )
+                mid = float(pc.mid)
+                strike_f = float(pc.strike)
+                yield_pct = (mid / strike_f) * 100 if strike_f > 0 else 0
+                lines.append(
+                    f"    Premium: ${mid:.2f}/contract "
+                    f"| Yield: {yield_pct:.1f}% ({pick.ann_yield:.0f}% ann)"
+                )
+            if nlv > 0:
+                target_alloc = float(nlv) * 0.015
+                max_alloc = float(nlv) * 0.05
+                if pick.put_contract:
+                    strike_f = float(pick.put_contract.strike)
+                    contracts = max(1, int(target_alloc / (strike_f * 100))) if strike_f > 0 else 1
+                    collateral = Decimal(contracts) * pick.put_contract.strike * 100
+                    while float(collateral) > max_alloc and contracts > 1:
+                        contracts -= 1
+                        collateral = Decimal(contracts) * pick.put_contract.strike * 100
+                    total_premium = Decimal(contracts) * pick.put_contract.mid * 100
+                    lines.append(
+                        f"    Size: {contracts}x ${pick.put_contract.strike} puts "
+                        f"(${collateral:,.0f} collateral, ${total_premium:,.0f} premium, "
+                        f"~{float(collateral) / float(nlv):.1%} NLV)"
+                    )
+                else:
+                    contracts = max(1, int(target_alloc / (pick.price * 100))) if pick.price > 0 else 1
+                    coll = contracts * pick.price * 100
+                    lines.append(f"    Size: ~{contracts}x puts (${coll:,.0f} collateral, "
+                                 f"~{coll / float(nlv):.1%} NLV)")
+
     # ── REALLOCATE — underperforming positions to redeploy ──
     if realloc_candidates:
-        lines.append(f"\n{_C.yellow(_C.bold('━━ REALLOCATE ━━'))} "
-                     f"{_C.dim('— sell underperformers, redeploy into wheel')}")
+        lines.append(f"\n🔄 {_C.yellow(_C.bold('REALLOCATE'))} "
+                     f"— sell underperformers, redeploy into wheel")
         for sym, qty, basis, cur_price, pnl_pct, reason in realloc_candidates[:5]:
             value = qty * cur_price
             pnl_dollar = qty * (cur_price - basis)
             pnl_color = _C.red if pnl_pct < 0 else _C.green
             lines.append(
-                f"  {_C.yellow('SELL')}: {_C.bold(sym)} — {qty} shares @ ${cur_price:,.2f} "
+                f"  ♻️ {_C.bold(sym)} — {qty} shares @ ${cur_price:,.2f} "
                 f"({pnl_color(f'{pnl_pct:+.0%}')}, {pnl_color(f'${pnl_dollar:+,.0f}')})"
             )
             lines.append(f"    {reason}")
-            lines.append(f"    Frees ${value:,.0f} — redeploy via puts on stronger names")
+            lines.append(f"    💵 Frees ${value:,.0f} → redeploy via puts")
 
     # ── WATCH — position holds + earnings + tax ──
     watch_positions = []
@@ -906,12 +1175,12 @@ def format_local_briefing(
 
     has_watch = watch_positions or upcoming_earnings or tax_alerts
     if has_watch:
-        lines.append(f"\n{_C.yellow(_C.bold('━━ WATCH ━━'))}")
+        lines.append(f"\n👀 {_C.yellow(_C.bold('WATCH'))}")
 
         for p in watch_positions:
             pos_desc = _format_position_desc(p)
-            action_color = _C.yellow if p.action == "WATCH CLOSELY" else _C.dim
-            lines.append(f"  {_C.bold(pos_desc)} — {action_color(p.action)}")
+            watch_emoji = "⚠️" if p.action == "WATCH CLOSELY" else "📌"
+            lines.append(f"  {watch_emoji} {_C.bold(pos_desc)}")
             if "\n" in p.reasoning:
                 # Multi-line reasoning: P&L on its own line, reasons indented below
                 lines.append(f"    P&L: {_pnl_colored(p.current_pnl, p.pnl_pct)} | {p.days_to_expiry}d left")
@@ -948,7 +1217,7 @@ def format_local_briefing(
             lines.append("")
             for sym, dt, days in sorted(upcoming_earnings, key=lambda x: x[2]):
                 label = "TOMORROW" if days <= 1 else f"{days}d"
-                lines.append(f"  Earnings: {sym} {dt} ({label})")
+                lines.append(f"  📅 Earnings: {sym} {dt} ({label})")
 
         for alert in tax_alerts:
             lines.append(f"  Tax: {alert}")
@@ -960,30 +1229,30 @@ def format_local_briefing(
         concentrated = [(sym, cnt) for sym, cnt in sym_counts.items() if cnt >= 2]
         if concentrated:
             if not has_watch:
-                lines.append(f"\n{_C.yellow(_C.bold('━━ WATCH ━━'))}")
+                lines.append(f"\n👀 {_C.yellow(_C.bold('WATCH'))}")
             lines.append("")
             for sym, cnt in sorted(concentrated, key=lambda x: -x[1]):
                 sym_positions = [p for p in position_reviews if p.symbol == sym]
                 total_exposure = sum(abs(p.current_pnl) + abs(p.entry_price * 100 * p.quantity)
                                      for p in sym_positions)
-                lines.append(f"  {_C.yellow('!!')} {_C.bold(sym)}: {cnt} open option positions — "
-                             f"watch single-name concentration (max 10% NLV)")
+                lines.append(f"  ⚠️ {_C.bold(sym)}: {cnt} positions — "
+                             f"watch concentration (max 10% NLV)")
 
     # ── Nothing to do ──
     if not (urgent_positions or high_trades or medium_trades or low_trades
             or watch_positions):
-        lines.append(f"\n  {_C.green('No signals fired. Sit tight.')}")
+        lines.append(f"\n  ✅ No signals fired. Sit tight.")
 
     # ── ANALYST BRIEF — Claude reasoning (when available) ──
     if analyst_brief:
-        lines.append(f"\n{_C.cyan(_C.bold('━━ ANALYST BRIEF ━━'))}")
+        lines.append(f"\n🧠 {_C.cyan(_C.bold('ANALYST BRIEF'))}")
         lines.append(analyst_brief)
 
     # ── YTD P&L — realized option performance from E*Trade ──
     if tax_engine and (tax_engine.option_premium_income_ytd > 0
                        or tax_engine.realized_stcg_ytd > 0
                        or tax_engine.realized_losses_ytd > 0):
-        lines.append(f"\n{_C.blue(_C.bold('━━ YTD OPTIONS P&L ━━'))}")
+        lines.append(f"\n💹 {_C.blue(_C.bold('YTD OPTIONS P&L'))}")
         lines.append(f"  Premium collected:  {_C.green(f'${tax_engine.option_premium_income_ytd:>10,.0f}')}")
         lines.append(f"  Realized gains:     {_C.green(f'${tax_engine.realized_stcg_ytd:>10,.0f}')}  (STCG)")
         if tax_engine.realized_ltcg_ytd > 0:
@@ -1049,7 +1318,7 @@ def format_local_briefing(
             skips.append(f"  {symbol}: No signal convergence. Sit tight.")
 
     if skips:
-        lines.append(f"\n{_C.dim('━━ SKIP ━━')}")
+        lines.append(f"\n⏭️ {_C.dim('SKIP')}")
         for s in skips:
             lines.append(_C.dim(s))
 
@@ -1215,6 +1484,16 @@ async def run_analysis_cycle(
         except Exception as e:
             log.warning("ytd_pnl_fetch_failed", error=str(e))
 
+    # 8b. Scanner — screen broader universe for wheel candidates
+    scanner_picks: list[ScannerPick] = []
+    try:
+        watchlist_set = set(symbols)
+        scanner_picks = scan_wheel_candidates(
+            watchlist_set, etrade_session=etrade_session,
+        )
+    except Exception as e:
+        log.warning("scanner_failed", error=str(e))
+
     # 9. Build and print briefing
     briefing = format_local_briefing(
         regime=regime,
@@ -1229,6 +1508,7 @@ async def run_analysis_cycle(
         position_reviews=position_reviews,
         tax_engine=tax_engine,
         portfolio_state=portfolio_state,
+        scanner_picks=scanner_picks,
     )
     print(briefing)
 

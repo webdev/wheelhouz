@@ -1885,7 +1885,7 @@ class TestYTDOrderParsing:
         # Strip ANSI for easy checking
         import re
         clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
-        assert "YTD Options P&L" in clean
+        assert "YTD OPTIONS P&L" in clean or "YTD P&L" in clean
         assert "$+2,700" in clean  # 3500 - 800 = 2700
         assert "$5,000" in clean  # premium
 

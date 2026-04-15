@@ -474,6 +474,21 @@ def review_position(
                   f"buy to close for ${close_cost:,.0f} and roll to next month")
         return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct, roll=roll)
 
+    # 2c. High-IV + short-dated: captured >50%, DTE ≤ 45, elevated IV.
+    # Deep OTM threshold is 80% but with limited time left and fat IV,
+    # the remaining premium decays slowly while collateral stays locked.
+    # Better to close, free collateral, and redeploy into a fresh cycle.
+    iv_rank = context.quant.iv_rank
+    if (is_short and pnl_pct >= 0.50
+            and position.days_to_expiry <= 45
+            and iv_rank > 60):
+        profit_dollars = pnl * 100 * position.quantity
+        close_cost = position.current_price * 100 * position.quantity
+        reason = (f"Captured {pnl_pct:.0%} with {position.days_to_expiry}d left in "
+                  f"high IV (rank {iv_rank:.0f}) — close for ${profit_dollars:,.0f} profit "
+                  f"and redeploy into a richer cycle")
+        return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct, roll=roll)
+
     # 3. WATCH CLOSELY checks — every reason must say WHAT TO DO
     watch_reasons: list[str] = []
 
@@ -555,7 +570,8 @@ def review_position(
             f"Not worth opening new positions here, but existing ones can ride")
 
     if watch_reasons:
-        return _make_review(position, "WATCH CLOSELY", ". ".join(watch_reasons), pnl, pnl_pct, roll=roll)
+        reasoning = watch_reasons[0] if len(watch_reasons) == 1 else "\n".join(f"• {r}" for r in watch_reasons)
+        return _make_review(position, "WATCH CLOSELY", reasoning, pnl, pnl_pct, roll=roll)
 
     # 4. HOLD — everything healthy
     hold_reasons = ["Thesis intact"]

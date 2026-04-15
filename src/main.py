@@ -19,6 +19,8 @@ from typing import Any
 
 import structlog
 
+logger = structlog.get_logger()
+
 from src.analysis.signals import detect_all_signals
 from src.analysis.sizing import size_position
 from src.analysis.strikes import find_smart_strikes
@@ -217,6 +219,7 @@ def build_recommendations(
                 )
 
     price_data = {sym: (mkt, hist, chain) for sym, mkt, hist, chain, _ in watchlist_data}
+    event_data = {sym: cal for sym, _, _, _, cal in watchlist_data}
     target_exp = date_type.today() + timedelta(days=30)
 
     recommendations: list[SizedOpportunity] = []
@@ -226,6 +229,14 @@ def build_recommendations(
     for symbol, sigs in put_signals.items():
         if symbol not in price_data:
             continue
+
+        # Earnings gate: never sell through earnings unless earnings_crush
+        cal = event_data.get(symbol)
+        if cal and cal.next_earnings and cal.next_earnings <= target_exp:
+            logger.info("rec_blocked_earnings", symbol=symbol, direction="sell_put",
+                        earnings=str(cal.next_earnings))
+            continue
+
         _, hist, chain = price_data[symbol]
 
         strikes = find_smart_strikes(symbol, chain, hist, "sell_put")
@@ -258,6 +269,13 @@ def build_recommendations(
         shares = owned_shares.get(symbol, 0)
         if shares < 100:
             continue  # no naked calls
+
+        # Earnings gate
+        cal = event_data.get(symbol)
+        if cal and cal.next_earnings and cal.next_earnings <= target_exp:
+            logger.info("rec_blocked_earnings", symbol=symbol, direction="sell_call",
+                        earnings=str(cal.next_earnings))
+            continue
 
         max_contracts = (shares // 100) - existing_short_calls.get(symbol, 0)
         if max_contracts <= 0:
@@ -297,6 +315,11 @@ def build_recommendations(
     if portfolio and intel_contexts:
         for symbol, shares in owned_shares.items():
             if symbol in sized_symbols or symbol not in price_data:
+                continue
+
+            # Earnings gate
+            cal = event_data.get(symbol)
+            if cal and cal.next_earnings and cal.next_earnings <= target_exp:
                 continue
 
             max_contracts = (shares // 100) - existing_short_calls.get(symbol, 0)
@@ -384,6 +407,41 @@ def _apply_tv_adjustment(sized: SizedOpportunity, tv_overall: str) -> SizedOppor
 # Local briefing formatter (no Claude API needed)
 # ---------------------------------------------------------------------------
 
+# ANSI color helpers for terminal output
+class _C:
+    """ANSI escape codes for terminal color."""
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    DIM = "\033[2m"
+    BOLD = "\033[1m"
+    RESET = "\033[0m"
+
+    @staticmethod
+    def red(s: str) -> str: return f"{_C.RED}{s}{_C.RESET}"
+    @staticmethod
+    def green(s: str) -> str: return f"{_C.GREEN}{s}{_C.RESET}"
+    @staticmethod
+    def yellow(s: str) -> str: return f"{_C.YELLOW}{s}{_C.RESET}"
+    @staticmethod
+    def blue(s: str) -> str: return f"{_C.BLUE}{s}{_C.RESET}"
+    @staticmethod
+    def cyan(s: str) -> str: return f"{_C.CYAN}{s}{_C.RESET}"
+    @staticmethod
+    def dim(s: str) -> str: return f"{_C.DIM}{s}{_C.RESET}"
+    @staticmethod
+    def bold(s: str) -> str: return f"{_C.BOLD}{s}{_C.RESET}"
+
+
+def _pnl_colored(pnl: Decimal, pnl_pct: float) -> str:
+    """Color a P&L string: green for profit, red for loss."""
+    if pnl >= 0:
+        return _C.green(f"+${pnl:,.0f} ({pnl_pct:+.0%})")
+    return _C.red(f"-${abs(pnl):,.0f} ({pnl_pct:+.0%})")
+
+
 def _format_stress_value(value: Decimal) -> str:
     """Format a stress test value: negative = still profitable, positive = real loss."""
     if value <= 0:
@@ -419,11 +477,16 @@ def format_local_briefing(
     lines: list[str] = []
 
     # Header — compact, regime baked in
-    lines.append(f"{'=' * 60}")
-    lines.append(f"  WHEEL COPILOT — {today}")
-    lines.append(f"  {regime_tag.get(regime.regime, regime.regime.upper())} "
-                 f"| VIX {vix:.1f} | SPY {spy_change:+.2%}")
-    lines.append(f"{'=' * 60}")
+    regime_name = regime_tag.get(regime.regime, regime.regime.upper())
+    regime_colors = {"ATTACK": _C.green, "HOLD": _C.yellow, "DEFEND": _C.red, "CRISIS": _C.red}
+    regime_fn = regime_colors.get(regime_name, _C.yellow)
+    spy_fn = _C.green if spy_change >= 0 else _C.red
+
+    lines.append(_C.dim(f"{'=' * 60}"))
+    lines.append(_C.bold(f"  WHEEL COPILOT — {today}"))
+    lines.append(f"  {regime_fn(regime_name)} "
+                 f"| VIX {vix:.1f} | SPY {spy_fn(f'{spy_change:+.2%}')}")
+    lines.append(_C.dim(f"{'=' * 60}"))
 
     # ── DO NOW — urgent position actions + high conviction trades ──
     # Collect urgent items
@@ -436,13 +499,13 @@ def format_local_briefing(
         high_trades = [r for r in recommendations if r.conviction == "high"]
 
     if urgent_positions or high_trades:
-        lines.append(f"\n━━ DO NOW ━━")
+        lines.append(f"\n{_C.red(_C.bold('━━ DO NOW ━━'))}")
 
         for p in urgent_positions:
             pos_desc = _format_position_desc(p)
-            pnl_str = f"+${p.current_pnl:,.0f}" if p.current_pnl >= 0 else f"-${abs(p.current_pnl):,.0f}"
-            lines.append(f"  {p.action}: {pos_desc}")
-            lines.append(f"    P&L: {pnl_str} ({p.pnl_pct:+.0%}) | {p.days_to_expiry}d left")
+            action_color = _C.red if p.action == "CLOSE NOW" else _C.green
+            lines.append(f"  {action_color(p.action)}: {_C.bold(pos_desc)}")
+            lines.append(f"    P&L: {_pnl_colored(p.current_pnl, p.pnl_pct)} | {p.days_to_expiry}d left")
             lines.append(f"    {p.reasoning}")
             if p.roll:
                 r = p.roll
@@ -478,7 +541,7 @@ def format_local_briefing(
             is_call = r.trade_type == "sell_call"
             trade_label = "Sell Covered Call" if is_call else "Sell Cash-Secured Put"
             opt_letter = "C" if is_call else "P"
-            lines.append(f"  >>> {r.symbol} — {trade_label}")
+            lines.append(f"  >>> {_C.bold(r.symbol)} — {_C.green(trade_label)}")
             lines.append(
                 f"      {r.contracts}x ${r.strike} {opt_letter} exp {exp_str} "
                 f"@ ${r.premium} mid"
@@ -513,7 +576,7 @@ def format_local_briefing(
         low_trades = [r for r in recommendations if r.conviction == "low"]
 
     if medium_trades or low_trades:
-        lines.append(f"\n━━ CONSIDER ━━")
+        lines.append(f"\n{_C.blue(_C.bold('━━ CONSIDER ━━'))}")
 
         for r in medium_trades + low_trades:
             exp_str = r.expiration.strftime("%b %d") if r.expiration else "~30 DTE"
@@ -526,7 +589,7 @@ def format_local_briefing(
 
             is_call = r.trade_type == "sell_call"
             opt_type = "Call" if is_call else "Put"
-            lines.append(f"   >> {r.symbol} — Sell ${r.strike} {opt_type} exp {exp_str}")
+            lines.append(f"   >> {_C.bold(r.symbol)} — Sell ${r.strike} {opt_type} exp {exp_str}")
             lines.append(
                 f"      {r.contracts}x @ ${r.premium} mid | "
                 f"{r.annualized_yield:.0%} ann.{delta_str}{tv_str}"
@@ -556,21 +619,28 @@ def format_local_briefing(
 
     has_watch = watch_positions or upcoming_earnings or tax_alerts
     if has_watch:
-        lines.append(f"\n━━ WATCH ━━")
+        lines.append(f"\n{_C.yellow(_C.bold('━━ WATCH ━━'))}")
 
         for p in watch_positions:
             pos_desc = _format_position_desc(p)
-            pnl_str = f"+${p.current_pnl:,.0f}" if p.current_pnl >= 0 else f"-${abs(p.current_pnl):,.0f}"
-            lines.append(f"  {pos_desc} — {p.action}")
-            lines.append(f"    P&L: {pnl_str} ({p.pnl_pct:+.0%}) | {p.days_to_expiry}d left | {p.reasoning}")
+            action_color = _C.yellow if p.action == "WATCH CLOSELY" else _C.dim
+            lines.append(f"  {_C.bold(pos_desc)} — {action_color(p.action)}")
+            if "\n" in p.reasoning:
+                # Multi-line reasoning: P&L on its own line, reasons indented below
+                lines.append(f"    P&L: {_pnl_colored(p.current_pnl, p.pnl_pct)} | {p.days_to_expiry}d left")
+                for reason_line in p.reasoning.split("\n"):
+                    lines.append(f"    {reason_line}")
+            else:
+                lines.append(f"    P&L: {_pnl_colored(p.current_pnl, p.pnl_pct)} | {p.days_to_expiry}d left | {p.reasoning}")
             if p.roll:
                 r = p.roll
                 opt_letter = "C" if p.option_type == "call" else "P"
+                credit_fn = _C.green if r.net_credit >= 0 else _C.red
                 credit_str = f"${r.net_credit:,.2f} credit" if r.net_credit >= 0 else f"${abs(r.net_credit):,.2f} debit"
                 total_str = f"+${r.total_net:,.0f}" if r.total_net >= 0 else f"-${abs(r.total_net):,.0f}"
-                lines.append(f"    ROLL: Buy back ${p.strike} {opt_letter} @ ${r.close_price:.2f} → "
+                lines.append(f"    {_C.cyan('ROLL')}: Buy back ${p.strike} {opt_letter} @ ${r.close_price:.2f} → "
                              f"Sell ${r.new_strike} {opt_letter} exp {r.new_expiration} @ ${r.new_premium:.2f}")
-                lines.append(f"          Net {credit_str}/contract ({total_str} total) [{r.roll_type}]")
+                lines.append(f"          Net {credit_fn(credit_str)}/contract ({credit_fn(total_str)} total) [{r.roll_type}]")
                 if r.risk:
                     rk = r.risk
                     if p.option_type == "put":
@@ -585,7 +655,7 @@ def format_local_briefing(
                                      f"20% drop → {s20} | "
                                      f"R/R {rk.risk_reward:.1f}:1")
                     for w in rk.warnings:
-                        lines.append(f"          !! {w}")
+                        lines.append(f"          {_C.yellow('!!')} {w}")
 
         if upcoming_earnings:
             lines.append("")
@@ -599,11 +669,11 @@ def format_local_briefing(
     # ── Nothing to do ──
     if not (urgent_positions or high_trades or medium_trades or low_trades
             or watch_positions):
-        lines.append(f"\n  No signals fired. Sit tight.")
+        lines.append(f"\n  {_C.green('No signals fired. Sit tight.')}")
 
     # ── ANALYST BRIEF — Claude reasoning (when available) ──
     if analyst_brief:
-        lines.append(f"\n━━ ANALYST BRIEF ━━")
+        lines.append(f"\n{_C.cyan(_C.bold('━━ ANALYST BRIEF ━━'))}")
         lines.append(analyst_brief)
 
     # ── SKIP — names the system looked at and explicitly rejected ──
@@ -646,12 +716,54 @@ def format_local_briefing(
             skips.append(f"  {symbol}: No signal convergence. Sit tight.")
 
     if skips:
-        lines.append(f"\n━━ SKIP ━━")
+        lines.append(f"\n{_C.dim('━━ SKIP ━━')}")
         for s in skips:
-            lines.append(s)
+            lines.append(_C.dim(s))
 
-    lines.append(f"\n{'=' * 60}")
+    lines.append(_C.dim(f"\n{'=' * 60}"))
     return "\n".join(lines)
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    import re
+    return re.sub(r'\033\[[0-9;]*m', '', text)
+
+
+def format_html_briefing(ansi_briefing: str) -> str:
+    """Convert the ANSI-colored briefing to HTML for Telegram/email.
+
+    Maps ANSI color codes to HTML spans. Preserves structure with <pre>
+    for monospace layout. Telegram supports a subset of HTML —
+    this uses only <b>, <span style>, and <pre>.
+    """
+    import re
+
+    # Strip ANSI and rebuild with HTML
+    html = ansi_briefing
+
+    # Map ANSI codes to HTML spans
+    replacements = [
+        ("\033[91m", '<span style="color:#e74c3c">'),   # red
+        ("\033[92m", '<span style="color:#2ecc71">'),   # green
+        ("\033[93m", '<span style="color:#f39c12">'),   # yellow
+        ("\033[94m", '<span style="color:#3498db">'),   # blue
+        ("\033[96m", '<span style="color:#1abc9c">'),   # cyan
+        ("\033[2m", '<span style="color:#7f8c8d">'),    # dim
+        ("\033[1m", "<b>"),                               # bold
+        ("\033[0m", "</span>"),                           # reset → close span
+    ]
+    for ansi, tag in replacements:
+        html = html.replace(ansi, tag)
+
+    # Fix bold resets (bold uses <b> but reset closes </span>)
+    # Count open <b> tags and close them properly
+    html = re.sub(r'<b>(.*?)</span>', r'<b>\1</b>', html)
+
+    # Wrap in pre for monospace
+    html = f'<pre style="font-family:monospace;font-size:13px;line-height:1.4">{html}</pre>'
+
+    return html
 
 
 # ---------------------------------------------------------------------------

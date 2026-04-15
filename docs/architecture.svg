@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 2200" font-family="Inter, -apple-system, system-ui, sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 2050" font-family="Inter, -apple-system, system-ui, sans-serif">
   <defs>
     <linearGradient id="headerGrad" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" style="stop-color:#1a1a2e"/>
@@ -49,19 +49,17 @@
   </defs>
 
   <!-- Background -->
-  <rect width="1400" height="2200" fill="#f8fafc" rx="0"/>
+  <rect width="1400" height="2050" fill="#f8fafc"/>
 
-  <!-- Title Header -->
+  <!-- ═══════════════ TITLE ═══════════════ -->
   <rect x="40" y="30" width="1320" height="100" rx="16" fill="url(#headerGrad)" filter="url(#shadow)"/>
   <text x="700" y="72" text-anchor="middle" fill="white" font-size="32" font-weight="700" letter-spacing="1">WHEEL COPILOT</text>
-  <text x="700" y="105" text-anchor="middle" fill="#94a3b8" font-size="16" font-weight="400">AI-Powered Options Trading System Architecture</text>
-
-  <!-- Portfolio badge -->
+  <text x="700" y="105" text-anchor="middle" fill="#94a3b8" font-size="16">AI-Powered Options Trading System — ~$1M Portfolio</text>
   <rect x="1100" y="50" width="220" height="60" rx="10" fill="rgba(255,255,255,0.08)" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
   <text x="1210" y="72" text-anchor="middle" fill="#94a3b8" font-size="11">3 E*TRADE ACCOUNTS</text>
   <text x="1210" y="93" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="600">Taxable | Roth | Trad IRA</text>
 
-  <!-- ═══════════════ LAYER 1: DATA SOURCES ═══════════════ -->
+  <!-- ═══════════════ LAYER 1: DATA PIPELINE ═══════════════ -->
   <text x="60" y="175" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">DATA PIPELINE</text>
   <line x1="60" y1="182" x2="250" y2="182" stroke="#cbd5e1" stroke-width="1"/>
 
@@ -74,7 +72,7 @@
   <text x="78" y="278" fill="#475569" font-size="12">Full Greeks: delta, gamma, theta, vega</text>
   <text x="78" y="298" fill="#475569" font-size="12">Portfolio positions + balances</text>
   <text x="78" y="318" fill="#475569" font-size="12">Rate limited: 4 req/s, 25-sym batch</text>
-  <circle cx="340" y="210" r="6" fill="#10b981"/>
+  <circle cx="340" cy="210" r="6" fill="#10b981"/>
   <text x="330" y="210" text-anchor="end" fill="#10b981" font-size="10" font-weight="600">PRIMARY</text>
 
   <!-- yfinance -->
@@ -86,7 +84,7 @@
   <text x="418" y="278" fill="#475569" font-size="12">VIX + SPY macro data</text>
   <text x="418" y="298" fill="#475569" font-size="12">252-day historical for IV rank calc</text>
   <text x="418" y="318" fill="#475569" font-size="12">Price history + technicals</text>
-  <circle cx="680" y="210" r="6" fill="#f59e0b"/>
+  <circle cx="680" cy="210" r="6" fill="#f59e0b"/>
   <text x="670" y="210" text-anchor="end" fill="#f59e0b" font-size="10" font-weight="600">FALLBACK</text>
 
   <!-- TradingView -->
@@ -104,27 +102,26 @@
   <rect x="1080" y="195" width="280" height="40" rx="12" fill="url(#riskGrad)"/>
   <rect x="1080" y="223" width="280" height="12" fill="url(#riskGrad)"/>
   <text x="1220" y="222" text-anchor="middle" fill="white" font-size="14" font-weight="600">REGIME MONITOR</text>
-  <text x="1098" y="258" fill="#475569" font-size="12">Polls every 60 seconds</text>
+  <text x="1098" y="258" fill="#475569" font-size="12">VIX polled every 60 seconds</text>
   <text x="1098" y="278" fill="#92400e" font-size="12" font-weight="600">ATTACK &lt;18 | HOLD 18-25</text>
   <text x="1098" y="298" fill="#92400e" font-size="12" font-weight="600">DEFEND 25-35 | CRISIS &gt;35</text>
   <text x="1098" y="318" fill="#475569" font-size="12">SPY -5% → forced Crisis mode</text>
 
   <!-- Flow arrows from data to signals -->
   <path d="M 210 340 L 210 380 L 450 380 L 450 410" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
-  <path d="M 550 340 L 550 380 L 550 380 L 550 410" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 550 340 L 550 410" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
   <path d="M 890 340 L 890 380 L 650 380 L 650 410" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
 
   <!-- ═══════════════ LAYER 2: SIGNAL DETECTION ═══════════════ -->
-  <text x="60" y="405" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">SIGNAL DETECTION</text>
-  <line x1="60" y1="412" x2="250" y2="412" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="60" y="405" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">SIGNAL DETECTION — 17 ALPHA SIGNALS</text>
+  <line x1="60" y1="412" x2="370" y2="412" stroke="#cbd5e1" stroke-width="1"/>
 
   <!-- Put Signals -->
   <rect x="60" y="420" width="620" height="280" rx="12" fill="white" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadowSm)"/>
   <rect x="60" y="420" width="620" height="40" rx="12" fill="url(#signalGrad)"/>
   <rect x="60" y="448" width="620" height="12" fill="url(#signalGrad)"/>
-  <text x="370" y="447" text-anchor="middle" fill="white" font-size="14" font-weight="600">13 PUT SIGNALS — Sell Puts on Weakness</text>
+  <text x="370" y="447" text-anchor="middle" fill="white" font-size="14" font-weight="600">13 PUT SIGNALS — Sell Puts on Weakness/Fear</text>
 
-  <!-- Put signal grid -->
   <g font-size="11" fill="#475569">
     <text x="78" y="485" font-weight="600" fill="#e94560">Dip Detection</text>
     <text x="78" y="504">Intraday Dip (down 2.5%+)</text>
@@ -164,7 +161,7 @@
   <rect x="535" y="637" width="65" height="22" rx="4" fill="#6b7280"/>
   <text x="567" y="653" text-anchor="middle" fill="white" font-size="10" font-weight="600">LOW</text>
   <text x="610" y="653" fill="#475569" font-size="10">1 signal</text>
-  <text x="88" y="674" fill="#64748b" font-size="10">Single signal = always LOW. You need convergence.</text>
+  <text x="88" y="674" fill="#64748b" font-size="10">Single signal = always LOW. You need convergence. Earnings gate blocks new trades through earnings.</text>
 
   <!-- Call Signals -->
   <rect x="720" y="420" width="320" height="165" rx="12" fill="white" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadowSm)"/>
@@ -194,48 +191,49 @@
   <text x="983" y="659" text-anchor="middle" fill="#065f46" font-size="10" font-weight="600">E3: 10%</text>
   <text x="983" y="685" text-anchor="middle" fill="#64748b" font-size="9">Dry Powder</text>
 
-  <!-- Arrow from signals to sizing/review -->
+  <!-- Arrows from signals to intelligence layer -->
   <path d="M 370 700 L 370 740" stroke="#e94560" stroke-width="2" fill="none" marker-end="url(#arrowRed)"/>
   <path d="M 880 585 L 880 620 L 1120 620 L 1120 740" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
 
-  <!-- ═══════════════ LAYER 3: POSITION REVIEW + SIZING ═══════════════ -->
+  <!-- ═══════════════ LAYER 3: INTELLIGENCE ═══════════════ -->
   <text x="60" y="755" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">INTELLIGENCE LAYER</text>
   <line x1="60" y1="762" x2="280" y2="762" stroke="#cbd5e1" stroke-width="1"/>
 
   <!-- Position Review -->
-  <rect x="60" y="770" width="600" height="340" rx="12" fill="white" stroke="#8b5cf6" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="60" y="770" width="600" height="370" rx="12" fill="white" stroke="#8b5cf6" stroke-width="2" filter="url(#shadow)"/>
   <rect x="60" y="770" width="600" height="42" rx="12" fill="url(#reviewGrad)"/>
   <rect x="60" y="800" width="600" height="12" fill="url(#reviewGrad)"/>
   <text x="360" y="798" text-anchor="middle" fill="white" font-size="15" font-weight="700">POSITION REVIEW — Priority Waterfall</text>
 
-  <!-- Action boxes -->
-  <rect x="80" y="825" width="560" height="52" rx="8" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
+  <rect x="80" y="825" width="560" height="50" rx="8" fill="#fef2f2" stroke="#fca5a5" stroke-width="1"/>
   <text x="95" y="843" fill="#dc2626" font-size="13" font-weight="700">1. CLOSE NOW</text>
   <text x="95" y="862" fill="#7f1d1d" font-size="11">Loss stop hit (2x monthlies, 1.5x weeklies) OR earnings before expiry ≤30 DTE</text>
 
-  <rect x="80" y="885" width="560" height="65" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
-  <text x="95" y="903" fill="#16a34a" font-size="13" font-weight="700">2. TAKE PROFIT</text>
-  <text x="95" y="920" fill="#14532d" font-size="11">Moneyness-scaled thresholds:</text>
-  <text x="115" y="937" fill="#14532d" font-size="11">Deep OTM (|delta| &lt; 0.10) → 80%  |  Moderate OTM → 50%  |  Near ATM (&gt; 0.25) → 40%</text>
+  <rect x="80" y="883" width="560" height="65" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+  <text x="95" y="901" fill="#16a34a" font-size="13" font-weight="700">2. TAKE PROFIT</text>
+  <text x="95" y="918" fill="#14532d" font-size="11">Moneyness-scaled: Deep OTM (|δ|&lt;0.10) → 80% | Moderate → 50% | Near ATM → 40%</text>
+  <text x="95" y="935" fill="#14532d" font-size="11">Time+IV boost: &gt;50% captured + ≤45 DTE + IV rank &gt;60 → take profit early</text>
 
-  <rect x="80" y="958" width="560" height="65" rx="8" fill="#fefce8" stroke="#fde68a" stroke-width="1"/>
-  <text x="95" y="976" fill="#ca8a04" font-size="13" font-weight="700">3. WATCH CLOSELY</text>
-  <text x="95" y="993" fill="#713f12" font-size="11">Earnings approaching (with specific guidance by moneyness + P&L)</text>
-  <text x="95" y="1010" fill="#713f12" font-size="11">TV flipped bearish | Confirmed downtrend | IV collapsed</text>
+  <rect x="80" y="956" width="560" height="65" rx="8" fill="#fefce8" stroke="#fde68a" stroke-width="1"/>
+  <text x="95" y="974" fill="#ca8a04" font-size="13" font-weight="700">3. WATCH CLOSELY</text>
+  <text x="95" y="991" fill="#713f12" font-size="11">Earnings approaching (prescriptive: trigger price + action + dollar risk)</text>
+  <text x="95" y="1008" fill="#713f12" font-size="11">TV flipped bearish | Confirmed downtrend | IV collapsed</text>
 
-  <rect x="80" y="1031" width="560" height="42" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
-  <text x="95" y="1049" fill="#475569" font-size="13" font-weight="700">4. HOLD</text>
-  <text x="95" y="1064" fill="#64748b" font-size="11">Thesis intact. TV consensus healthy. Trend confirmed.</text>
+  <rect x="80" y="1029" width="560" height="42" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="95" y="1047" fill="#475569" font-size="13" font-weight="700">4. HOLD</text>
+  <text x="95" y="1062" fill="#64748b" font-size="11">Thesis intact. TV consensus healthy. Trend confirmed.</text>
 
-  <text x="360" y="1098" text-anchor="middle" fill="#7c3aed" font-size="11" font-weight="600">Every action includes roll recommendations with risk metrics</text>
+  <!-- Roll safety -->
+  <rect x="80" y="1080" width="560" height="46" rx="8" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="95" y="1098" fill="#1e40af" font-size="11" font-weight="600">ROLL SAFETY GATES</text>
+  <text x="95" y="1115" fill="#1e40af" font-size="10">Puts never roll UP | Calls never roll DOWN | Debit &gt; premium → blocked | Stress tested</text>
 
   <!-- Risk Management -->
-  <rect x="700" y="770" width="660" height="340" rx="12" fill="white" stroke="#f59e0b" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="700" y="770" width="660" height="370" rx="12" fill="white" stroke="#f59e0b" stroke-width="2" filter="url(#shadow)"/>
   <rect x="700" y="770" width="660" height="42" rx="12" fill="url(#riskGrad)"/>
   <rect x="700" y="800" width="660" height="12" fill="url(#riskGrad)"/>
   <text x="1030" y="798" text-anchor="middle" fill="white" font-size="15" font-weight="700">RISK MANAGEMENT</text>
 
-  <!-- Greek-Aware Rolls -->
   <text x="718" y="835" fill="#1e293b" font-size="12" font-weight="700">Greek-Aware Roll Engine</text>
 
   <rect x="718" y="845" width="300" height="88" rx="8" fill="#fffbeb" stroke="#fde68a" stroke-width="1"/>
@@ -246,11 +244,10 @@
 
   <rect x="1030" y="845" width="310" height="88" rx="8" fill="#fef2f2" stroke="#fecaca" stroke-width="1"/>
   <text x="1042" y="863" fill="#991b1b" font-size="11" font-weight="600">Stress Testing (Per Contract)</text>
-  <text x="1042" y="880" fill="#7f1d1d" font-size="10">10% stock drop → dollar loss</text>
+  <text x="1042" y="880" fill="#7f1d1d" font-size="10">10% stock drop → dollar loss or "safe"</text>
   <text x="1042" y="895" fill="#7f1d1d" font-size="10">20% stock drop → dollar loss</text>
   <text x="1042" y="910" fill="#7f1d1d" font-size="10">Risk/Reward &gt; 3:1 → ROLL BLOCKED</text>
 
-  <!-- Portfolio Risk -->
   <text x="718" y="955" fill="#1e293b" font-size="12" font-weight="700">Portfolio Risk Limits</text>
 
   <g font-size="10.5" fill="#475569">
@@ -273,166 +270,164 @@
     <text x="1052" y="1078">Single signal = always LOW conviction</text>
   </g>
 
-  <!-- Arrows from review + risk to output -->
-  <path d="M 360 1110 L 360 1170" stroke="#8b5cf6" stroke-width="2" fill="none" marker-end="url(#arrowPurple)"/>
-  <path d="M 1030 1110 L 1030 1145 L 700 1145 L 700 1170" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <!-- Arrows to strike selection -->
+  <path d="M 360 1140 L 360 1180" stroke="#8b5cf6" stroke-width="2" fill="none" marker-end="url(#arrowPurple)"/>
+  <path d="M 1030 1090 L 1030 1155 L 700 1155 L 700 1180" stroke="#64748b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
 
-  <!-- ═══════════════ LAYER 4: SMART STRIKE SELECTION ═══════════════ -->
-  <text x="60" y="1165" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">STRIKE SELECTION + SIZING</text>
-  <line x1="60" y1="1172" x2="330" y2="1172" stroke="#cbd5e1" stroke-width="1"/>
+  <!-- ═══════════════ LAYER 4: STRIKE SELECTION ═══════════════ -->
+  <text x="60" y="1178" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">STRIKE SELECTION</text>
+  <line x1="60" y1="1185" x2="260" y2="1185" stroke="#cbd5e1" stroke-width="1"/>
 
-  <rect x="60" y="1182" width="1300" height="130" rx="12" fill="white" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadowSm)"/>
+  <rect x="60" y="1195" width="1300" height="130" rx="12" fill="white" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadowSm)"/>
 
-  <!-- Put strike levels -->
-  <text x="80" y="1210" fill="#e94560" font-size="13" font-weight="700">PUT STRIKES (Support Levels Below Price)</text>
+  <text x="80" y="1223" fill="#e94560" font-size="13" font-weight="700">PUT STRIKES (Support Below Price)</text>
   <g font-size="11" fill="#475569">
-    <rect x="80" y="1220" width="110" height="26" rx="6" fill="#fef2f2"/>
-    <text x="135" y="1238" text-anchor="middle">200 SMA</text>
-    <rect x="200" y="1220" width="100" height="26" rx="6" fill="#fef2f2"/>
-    <text x="250" y="1238" text-anchor="middle">50 SMA</text>
-    <rect x="310" y="1220" width="100" height="26" rx="6" fill="#fef2f2"/>
-    <text x="360" y="1238" text-anchor="middle">52w Low</text>
-    <rect x="420" y="1220" width="110" height="26" rx="6" fill="#fef2f2"/>
-    <text x="475" y="1238" text-anchor="middle">Swing Low</text>
-    <rect x="540" y="1220" width="100" height="26" rx="6" fill="#fef2f2"/>
-    <text x="590" y="1238" text-anchor="middle">90d VWAP</text>
+    <rect x="80" y="1233" width="100" height="26" rx="6" fill="#fef2f2"/>
+    <text x="130" y="1251" text-anchor="middle">200 SMA</text>
+    <rect x="190" y="1233" width="90" height="26" rx="6" fill="#fef2f2"/>
+    <text x="235" y="1251" text-anchor="middle">50 SMA</text>
+    <rect x="290" y="1233" width="95" height="26" rx="6" fill="#fef2f2"/>
+    <text x="337" y="1251" text-anchor="middle">52w Low</text>
+    <rect x="395" y="1233" width="105" height="26" rx="6" fill="#fef2f2"/>
+    <text x="447" y="1251" text-anchor="middle">Swing Low</text>
+    <rect x="510" y="1233" width="95" height="26" rx="6" fill="#fef2f2"/>
+    <text x="557" y="1251" text-anchor="middle">90d VWAP</text>
   </g>
 
-  <!-- Call strike levels -->
-  <text x="80" y="1275" fill="#2563eb" font-size="13" font-weight="700">CALL STRIKES (Resistance Levels Above Price)</text>
+  <text x="80" y="1288" fill="#2563eb" font-size="13" font-weight="700">CALL STRIKES (Resistance Above Price)</text>
   <g font-size="11" fill="#475569">
-    <rect x="80" y="1285" width="100" height="26" rx="6" fill="#eff6ff"/>
-    <text x="130" y="1303" text-anchor="middle">52w High</text>
-    <rect x="190" y="1285" width="110" height="26" rx="6" fill="#eff6ff"/>
-    <text x="245" y="1303" text-anchor="middle">200 SMA</text>
-    <rect x="310" y="1285" width="100" height="26" rx="6" fill="#eff6ff"/>
-    <text x="360" y="1303" text-anchor="middle">50 SMA</text>
-    <rect x="420" y="1285" width="120" height="26" rx="6" fill="#eff6ff"/>
-    <text x="480" y="1303" text-anchor="middle">Swing High</text>
+    <rect x="80" y="1297" width="95" height="26" rx="6" fill="#eff6ff"/>
+    <text x="127" y="1315" text-anchor="middle">52w High</text>
+    <rect x="185" y="1297" width="100" height="26" rx="6" fill="#eff6ff"/>
+    <text x="235" y="1315" text-anchor="middle">200 SMA</text>
+    <rect x="295" y="1297" width="90" height="26" rx="6" fill="#eff6ff"/>
+    <text x="340" y="1315" text-anchor="middle">50 SMA</text>
+    <rect x="395" y="1297" width="115" height="26" rx="6" fill="#eff6ff"/>
+    <text x="452" y="1315" text-anchor="middle">Swing High</text>
   </g>
 
-  <!-- Scoring note -->
-  <rect x="750" y="1200" width="580" height="90" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
-  <text x="770" y="1225" fill="#1e293b" font-size="12" font-weight="600">Strike Scoring Formula</text>
-  <text x="770" y="1245" fill="#475569" font-size="11">Delta proximity score (30%) + Yield score (40%) + Technical level (30%)</text>
-  <text x="770" y="1265" fill="#475569" font-size="11">Real chain data (E*Trade bid/ask/delta) when available</text>
-  <text x="770" y="1285" fill="#475569" font-size="11">Estimated from ATM IV and distance when chain unavailable</text>
+  <rect x="750" y="1210" width="580" height="95" rx="10" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="770" y="1235" fill="#1e293b" font-size="12" font-weight="600">Strike Scoring</text>
+  <text x="770" y="1255" fill="#475569" font-size="11">Delta proximity (30%) + Yield (40%) + Technical level (30%)</text>
+  <text x="770" y="1275" fill="#475569" font-size="11">Real chain data from E*Trade when available; estimated otherwise</text>
+  <text x="770" y="1295" fill="#475569" font-size="11">TradingView consensus adjusts: STRONG_SELL → SKIP, BUY → upgrade</text>
 
   <!-- Arrow to output -->
-  <path d="M 700 1312 L 700 1355" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
+  <path d="M 700 1325 L 700 1368" stroke="#10b981" stroke-width="2" fill="none" marker-end="url(#arrowGreen)"/>
 
   <!-- ═══════════════ LAYER 5: OUTPUT ═══════════════ -->
-  <text x="60" y="1355" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">BRIEFING OUTPUT</text>
-  <line x1="60" y1="1362" x2="250" y2="1362" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="60" y="1365" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">BRIEFING OUTPUT</text>
+  <line x1="60" y1="1372" x2="250" y2="1372" stroke="#cbd5e1" stroke-width="1"/>
 
-  <rect x="60" y="1370" width="780" height="340" rx="12" fill="white" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
-  <rect x="60" y="1370" width="780" height="42" rx="12" fill="url(#outputGrad)"/>
-  <rect x="60" y="1400" width="780" height="12" fill="url(#outputGrad)"/>
-  <text x="450" y="1398" text-anchor="middle" fill="white" font-size="15" font-weight="700">DAILY BRIEFING — 5x per Day</text>
+  <rect x="60" y="1382" width="780" height="310" rx="12" fill="white" stroke="#10b981" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="60" y="1382" width="780" height="42" rx="12" fill="url(#outputGrad)"/>
+  <rect x="60" y="1412" width="780" height="12" fill="url(#outputGrad)"/>
+  <text x="450" y="1410" text-anchor="middle" fill="white" font-size="15" font-weight="700">COLOR-CODED BRIEFING — 5x Daily</text>
 
-  <!-- Briefing sections -->
-  <rect x="80" y="1425" width="180" height="56" rx="8" fill="#dc2626"/>
-  <text x="170" y="1448" text-anchor="middle" fill="white" font-size="13" font-weight="700">DO NOW</text>
-  <text x="170" y="1468" text-anchor="middle" fill="#fecaca" font-size="10">Close/Roll + HIGH trades</text>
+  <!-- Briefing section boxes -->
+  <rect x="80" y="1437" width="170" height="50" rx="8" fill="#dc2626"/>
+  <text x="165" y="1458" text-anchor="middle" fill="white" font-size="13" font-weight="700">DO NOW</text>
+  <text x="165" y="1476" text-anchor="middle" fill="#fecaca" font-size="9">Close/Roll + HIGH trades</text>
 
-  <rect x="270" y="1425" width="180" height="56" rx="8" fill="#f59e0b"/>
-  <text x="360" y="1448" text-anchor="middle" fill="white" font-size="13" font-weight="700">CONSIDER</text>
-  <text x="360" y="1468" text-anchor="middle" fill="#fef3c7" font-size="10">MEDIUM + LOW trades</text>
+  <rect x="260" y="1437" width="170" height="50" rx="8" fill="#3498db"/>
+  <text x="345" y="1458" text-anchor="middle" fill="white" font-size="13" font-weight="700">CONSIDER</text>
+  <text x="345" y="1476" text-anchor="middle" fill="#bfdbfe" font-size="9">MEDIUM + LOW trades</text>
 
-  <rect x="460" y="1425" width="180" height="56" rx="8" fill="#8b5cf6"/>
-  <text x="550" y="1448" text-anchor="middle" fill="white" font-size="13" font-weight="700">WATCH</text>
-  <text x="550" y="1468" text-anchor="middle" fill="#ddd6fe" font-size="10">Positions + Earnings + Tax</text>
+  <rect x="440" y="1437" width="170" height="50" rx="8" fill="#f59e0b"/>
+  <text x="525" y="1458" text-anchor="middle" fill="white" font-size="13" font-weight="700">WATCH</text>
+  <text x="525" y="1476" text-anchor="middle" fill="#fef3c7" font-size="9">Positions + Earnings</text>
 
-  <rect x="650" y="1425" width="170" height="56" rx="8" fill="#6b7280"/>
-  <text x="735" y="1448" text-anchor="middle" fill="white" font-size="13" font-weight="700">SKIP</text>
-  <text x="735" y="1468" text-anchor="middle" fill="#d1d5db" font-size="10">Rejected with reason</text>
+  <rect x="620" y="1437" width="100" height="50" rx="8" fill="#6b7280"/>
+  <text x="670" y="1458" text-anchor="middle" fill="white" font-size="13" font-weight="700">SKIP</text>
+  <text x="670" y="1476" text-anchor="middle" fill="#d1d5db" font-size="9">With reason</text>
 
-  <!-- Example briefing content -->
-  <rect x="80" y="1495" width="740" height="195" rx="8" fill="#0f172a" stroke="#334155" stroke-width="1"/>
+  <rect x="730" y="1437" width="90" height="50" rx="8" fill="#1abc9c"/>
+  <text x="775" y="1458" text-anchor="middle" fill="white" font-size="11" font-weight="700">ANALYST</text>
+  <text x="775" y="1476" text-anchor="middle" fill="#d1fae5" font-size="9">AI reasoning</text>
+
+  <!-- Example terminal output -->
+  <rect x="80" y="1500" width="740" height="170" rx="8" fill="#0f172a" stroke="#334155" stroke-width="1"/>
   <g font-family="'SF Mono', 'Fira Code', Menlo, monospace" font-size="10.5" fill="#e2e8f0">
-    <text x="95" y="1515" fill="#94a3b8">============================================================</text>
-    <text x="95" y="1532" fill="white" font-weight="600">  WHEEL COPILOT — Tuesday, April 14, 2026</text>
-    <text x="95" y="1549" fill="#fbbf24">  HOLD | VIX 18.4 | SPY +1.22%</text>
-    <text x="95" y="1566" fill="#94a3b8">============================================================</text>
-    <text x="95" y="1586" fill="#f87171">━━ DO NOW ━━</text>
-    <text x="95" y="1603" fill="#e2e8f0">  TAKE PROFIT: MU -1x May 15 $320 put</text>
-    <text x="95" y="1620" fill="#86efac">    P&amp;L: +$447 (+64%) | 31d left</text>
-    <text x="95" y="1637" fill="#93c5fd">    ROLL: Buy back $320P → Sell $380P exp Jun 25 @ $4.20</text>
-    <text x="95" y="1654" fill="#fbbf24">          Delta -0.16 | Stress: 10% drop → $2,400 loss</text>
-    <text x="95" y="1671" fill="#94a3b8">━━ WATCH ━━</text>
-    <text x="95" y="1688" fill="#e2e8f0">  GOOG -1x Oct $270P — Earnings in 15d. Deep OTM, safe to hold</text>
+    <text x="95" y="1520" fill="#94a3b8">============================================================</text>
+    <text x="95" y="1537" fill="white" font-weight="600">  WHEEL COPILOT — Tuesday, April 14, 2026</text>
+    <text x="95" y="1554" fill="#fbbf24">  HOLD | VIX 18.4 | SPY </text><text x="353" y="1554" fill="#2ecc71">+1.22%</text>
+    <text x="95" y="1571" fill="#94a3b8">============================================================</text>
+    <text x="95" y="1591" fill="#2ecc71" font-weight="600">━━ DO NOW ━━</text>
+    <text x="95" y="1608" fill="#2ecc71">  TAKE PROFIT: MU -1x May 15 $320 put</text>
+    <text x="95" y="1625" fill="#2ecc71">    P&amp;L: +$447 (+64%) | 31d left in high IV (rank 100)</text>
+    <text x="95" y="1645" fill="#f39c12" font-weight="600">━━ WATCH ━━</text>
+    <text x="95" y="1662" fill="#e2e8f0">  AMZN -1x $230 put — Set alert at $242. Buy to close if hit.</text>
   </g>
 
   <!-- Schedule -->
-  <rect x="880" y="1370" width="480" height="165" rx="12" fill="white" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadowSm)"/>
-  <text x="900" y="1400" fill="#1e293b" font-size="13" font-weight="700">ANALYSIS SCHEDULE</text>
+  <rect x="880" y="1382" width="480" height="155" rx="12" fill="white" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadowSm)"/>
+  <text x="900" y="1412" fill="#1e293b" font-size="13" font-weight="700">ANALYSIS SCHEDULE</text>
   <g font-size="11" fill="#475569">
-    <text x="900" y="1425">8:00 AM</text><text x="980" y="1425" font-weight="600" fill="#1e293b">Morning Briefing</text><text x="1200" y="1425" fill="#10b981">Always Push</text>
-    <text x="900" y="1445">10:30 AM</text><text x="980" y="1445" font-weight="600" fill="#1e293b">Post-Opening</text><text x="1200" y="1445" fill="#64748b">If changed</text>
-    <text x="900" y="1465">1:00 PM</text><text x="980" y="1465" font-weight="600" fill="#1e293b">Midday Check</text><text x="1200" y="1465" fill="#64748b">If unhealthy</text>
-    <text x="900" y="1485">3:30 PM</text><text x="980" y="1485" font-weight="600" fill="#1e293b">End-of-Day</text><text x="1200" y="1485" fill="#64748b">If action</text>
-    <text x="900" y="1505">4:30 PM</text><text x="980" y="1505" font-weight="600" fill="#1e293b">Post-Market</text><text x="1200" y="1505" fill="#10b981">Always Push</text>
-    <text x="900" y="1525" fill="#94a3b8" font-size="10">Pre-market sentinel: 6:00, 7:00, 7:30 AM</text>
+    <text x="900" y="1437">8:00 AM</text><text x="980" y="1437" font-weight="600" fill="#1e293b">Morning Briefing</text><text x="1200" y="1437" fill="#10b981">Always Push</text>
+    <text x="900" y="1457">10:30 AM</text><text x="980" y="1457" font-weight="600" fill="#1e293b">Post-Opening</text><text x="1200" y="1457" fill="#64748b">If changed</text>
+    <text x="900" y="1477">1:00 PM</text><text x="980" y="1477" font-weight="600" fill="#1e293b">Midday Check</text><text x="1200" y="1477" fill="#64748b">If unhealthy</text>
+    <text x="900" y="1497">3:30 PM</text><text x="980" y="1497" font-weight="600" fill="#1e293b">End-of-Day</text><text x="1200" y="1497" fill="#64748b">If action</text>
+    <text x="900" y="1517">4:30 PM</text><text x="980" y="1517" font-weight="600" fill="#1e293b">Post-Market</text><text x="1200" y="1517" fill="#10b981">Always Push</text>
+    <text x="900" y="1531" fill="#94a3b8" font-size="10">Pre-market sentinel: 6:00, 7:00, 7:30 AM</text>
   </g>
 
   <!-- Tax & Account Routing -->
-  <rect x="880" y="1550" width="480" height="160" rx="12" fill="white" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadowSm)"/>
+  <rect x="880" y="1550" width="480" height="145" rx="12" fill="white" stroke="#e2e8f0" stroke-width="1.5" filter="url(#shadowSm)"/>
   <text x="900" y="1580" fill="#1e293b" font-size="13" font-weight="700">TAX + ACCOUNT ROUTING</text>
   <g font-size="11">
-    <rect x="900" y="1590" width="140" height="28" rx="6" fill="#d1fae5"/>
-    <text x="970" y="1609" text-anchor="middle" fill="#065f46" font-weight="600">ROTH IRA</text>
-    <text x="1050" y="1609" fill="#475569">← Premium income (tax-free)</text>
+    <rect x="900" y="1590" width="140" height="26" rx="6" fill="#d1fae5"/>
+    <text x="970" y="1608" text-anchor="middle" fill="#065f46" font-weight="600">ROTH IRA</text>
+    <text x="1050" y="1608" fill="#475569">← Premium income (tax-free)</text>
 
-    <rect x="900" y="1625" width="140" height="28" rx="6" fill="#dbeafe"/>
-    <text x="970" y="1644" text-anchor="middle" fill="#1e40af" font-weight="600">TRAD IRA</text>
-    <text x="1050" y="1644" fill="#475569">← Tax-deferred overflow</text>
+    <rect x="900" y="1622" width="140" height="26" rx="6" fill="#dbeafe"/>
+    <text x="970" y="1640" text-anchor="middle" fill="#1e40af" font-weight="600">TRAD IRA</text>
+    <text x="1050" y="1640" fill="#475569">← Tax-deferred overflow</text>
 
-    <rect x="900" y="1660" width="140" height="28" rx="6" fill="#fef3c7"/>
-    <text x="970" y="1679" text-anchor="middle" fill="#92400e" font-weight="600">TAXABLE</text>
-    <text x="1050" y="1679" fill="#475569">← Spreads, strangles, LTCG</text>
+    <rect x="900" y="1654" width="140" height="26" rx="6" fill="#fef3c7"/>
+    <text x="970" y="1672" text-anchor="middle" fill="#92400e" font-weight="600">TAXABLE</text>
+    <text x="1050" y="1672" fill="#475569">← Spreads, strangles, LTCG</text>
 
-    <text x="900" y="1703" fill="#dc2626" font-size="10" font-weight="600">Wash sale: 30 cal day block | LTCG: 365 day protection</text>
+    <text x="900" y="1692" fill="#dc2626" font-size="10" font-weight="600">Wash sale: 30 cal day block | LTCG: 365 day protection | NIIT 3.8%</text>
   </g>
 
   <!-- ═══════════════ LAYER 6: LEARNING LOOP ═══════════════ -->
-  <text x="60" y="1745" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">SELF-TUNING LOOP</text>
-  <line x1="60" y1="1752" x2="250" y2="1752" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="60" y="1735" fill="#475569" font-size="13" font-weight="600" letter-spacing="2">SELF-TUNING LOOP</text>
+  <line x1="60" y1="1742" x2="250" y2="1742" stroke="#cbd5e1" stroke-width="1"/>
 
-  <rect x="60" y="1762" width="1300" height="140" rx="12" fill="white" stroke="#6366f1" stroke-width="2" filter="url(#shadow)"/>
-  <rect x="60" y="1762" width="1300" height="42" rx="12" fill="url(#learnGrad)"/>
-  <rect x="60" y="1792" width="1300" height="12" fill="url(#learnGrad)"/>
-  <text x="700" y="1790" text-anchor="middle" fill="white" font-size="15" font-weight="700">WEEKLY LEARNING LOOP — Saturdays</text>
+  <rect x="60" y="1752" width="1300" height="130" rx="12" fill="white" stroke="#6366f1" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="60" y="1752" width="1300" height="42" rx="12" fill="url(#learnGrad)"/>
+  <rect x="60" y="1782" width="1300" height="12" fill="url(#learnGrad)"/>
+  <text x="700" y="1780" text-anchor="middle" fill="white" font-size="15" font-weight="700">WEEKLY LEARNING LOOP — Saturdays</text>
 
-  <!-- Learning cycle boxes -->
-  <rect x="80" y="1815" width="230" height="70" rx="8" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1"/>
-  <text x="195" y="1838" text-anchor="middle" fill="#3730a3" font-size="12" font-weight="600">Walk-Forward Backtest</text>
-  <text x="195" y="1855" text-anchor="middle" fill="#4338ca" font-size="10">Train 252d → Test 126d → Step 63d</text>
-  <text x="195" y="1870" text-anchor="middle" fill="#4338ca" font-size="10">OOS Sharpe &lt; 0.8 → flag signal</text>
+  <rect x="80" y="1805" width="230" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1"/>
+  <text x="195" y="1828" text-anchor="middle" fill="#3730a3" font-size="12" font-weight="600">Walk-Forward Backtest</text>
+  <text x="195" y="1845" text-anchor="middle" fill="#4338ca" font-size="10">Train 252d → Test 126d → Step 63d</text>
+  <text x="195" y="1858" text-anchor="middle" fill="#4338ca" font-size="10">OOS Sharpe &lt; 0.8 → flag signal</text>
 
-  <path d="M 310 1850 L 340 1850" stroke="#6366f1" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 310 1835 L 340 1835" stroke="#6366f1" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
 
-  <rect x="350" y="1815" width="230" height="70" rx="8" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1"/>
-  <text x="465" y="1838" text-anchor="middle" fill="#3730a3" font-size="12" font-weight="600">Signal Weight Adjust</text>
-  <text x="465" y="1855" text-anchor="middle" fill="#4338ca" font-size="10">Sharpe &gt;2 + WR &gt;70% → +10%</text>
-  <text x="465" y="1870" text-anchor="middle" fill="#4338ca" font-size="10">Max 15% change per cycle</text>
+  <rect x="350" y="1805" width="230" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1"/>
+  <text x="465" y="1828" text-anchor="middle" fill="#3730a3" font-size="12" font-weight="600">Signal Weight Adjust</text>
+  <text x="465" y="1845" text-anchor="middle" fill="#4338ca" font-size="10">Sharpe &gt;2 + WR &gt;70% → +10%</text>
+  <text x="465" y="1858" text-anchor="middle" fill="#4338ca" font-size="10">Max 15% change per cycle</text>
 
-  <path d="M 580 1850 L 610 1850" stroke="#6366f1" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 580 1835 L 610 1835" stroke="#6366f1" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
 
-  <rect x="620" y="1815" width="230" height="70" rx="8" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1"/>
-  <text x="735" y="1838" text-anchor="middle" fill="#3730a3" font-size="12" font-weight="600">Attribution Analysis</text>
-  <text x="735" y="1855" text-anchor="middle" fill="#4338ca" font-size="10">Per-signal performance tracking</text>
-  <text x="735" y="1870" text-anchor="middle" fill="#4338ca" font-size="10">Which signals actually make money?</text>
+  <rect x="620" y="1805" width="230" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1"/>
+  <text x="735" y="1828" text-anchor="middle" fill="#3730a3" font-size="12" font-weight="600">Attribution Analysis</text>
+  <text x="735" y="1845" text-anchor="middle" fill="#4338ca" font-size="10">Per-signal performance tracking</text>
+  <text x="735" y="1858" text-anchor="middle" fill="#4338ca" font-size="10">Which signals actually make money?</text>
 
-  <path d="M 850 1850 L 880 1850" stroke="#6366f1" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 850 1835 L 880 1835" stroke="#6366f1" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
 
-  <rect x="890" y="1815" width="230" height="70" rx="8" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1"/>
-  <text x="1005" y="1838" text-anchor="middle" fill="#3730a3" font-size="12" font-weight="600">Benchmark Check</text>
-  <text x="1005" y="1855" text-anchor="middle" fill="#4338ca" font-size="10">vs SPY, QQQ, vanilla wheel</text>
-  <text x="1005" y="1870" text-anchor="middle" fill="#4338ca" font-size="10">3mo underperform → simplify</text>
+  <rect x="890" y="1805" width="230" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe" stroke-width="1"/>
+  <text x="1005" y="1828" text-anchor="middle" fill="#3730a3" font-size="12" font-weight="600">Benchmark Check</text>
+  <text x="1005" y="1845" text-anchor="middle" fill="#4338ca" font-size="10">vs SPY, QQQ, vanilla wheel</text>
+  <text x="1005" y="1858" text-anchor="middle" fill="#4338ca" font-size="10">3mo underperform → simplify</text>
 
   <!-- ═══════════════ FOOTER ═══════════════ -->
-  <rect x="60" y="1930" width="1300" height="80" rx="12" fill="#1e293b" filter="url(#shadow)"/>
-  <text x="700" y="1960" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">TARGET: 25-40% Annualized | Go-Live: WR ≥55%, HIGH WR ≥65%, Max DD &lt;12%</text>
-  <text x="700" y="1985" text-anchor="middle" fill="#94a3b8" font-size="12">Manual approval on everything → Auto-close month 3 → Auto-HIGH month 4 → Auto-HIGH+MED month 5+</text>
+  <rect x="60" y="1910" width="1300" height="80" rx="12" fill="#1e293b" filter="url(#shadow)"/>
+  <text x="700" y="1942" text-anchor="middle" fill="#e2e8f0" font-size="14" font-weight="600">TARGET: 25-40% Annualized | Go-Live: WR ≥55%, HIGH WR ≥65%, Max DD &lt;12%</text>
+  <text x="700" y="1967" text-anchor="middle" fill="#94a3b8" font-size="12">Manual approval → Auto-close M3 → Auto-HIGH M4 → Auto-HIGH+MED M5+ | Telegram + Email delivery</text>
 
 </svg>

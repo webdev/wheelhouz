@@ -1258,3 +1258,116 @@ class TestDeepOTMEarningsAdvice:
         result = review_position(pos, ctx)
         assert result.action == "WATCH CLOSELY"
         assert "close before report to limit loss" in result.reasoning.lower()
+
+
+class TestEarningsGate:
+    """New recommendations should be blocked when earnings are imminent."""
+
+    def test_put_blocked_through_earnings(self) -> None:
+        """Should not recommend a new put when earnings fall before expiry."""
+        from src.main import build_recommendations
+        from tests.fixtures.market_data import (
+            make_market_context, make_price_history,
+            make_options_chain, make_event_calendar,
+        )
+        from src.models.signals import AlphaSignal
+        from src.models.enums import SignalType
+
+        sig = AlphaSignal(
+            symbol="MSFT",
+            signal_type=SignalType.SUPPORT_BOUNCE,
+            strength=70.0,
+            direction="sell_put",
+            reasoning="test",
+            expires=datetime.utcnow() + timedelta(hours=24),
+        )
+
+        mkt = make_market_context(symbol="MSFT", price=Decimal("390.00"))
+        hist = make_price_history(symbol="MSFT", current_price=Decimal("390.00"))
+        chain = make_options_chain(symbol="MSFT")
+        # Earnings in 15 days — within the 30-day target expiration
+        cal = make_event_calendar(symbol="MSFT", next_earnings=date.today() + timedelta(days=15))
+        watchlist_data = [("MSFT", mkt, hist, chain, cal)]
+
+        recs = build_recommendations([sig], watchlist_data)
+        assert len(recs) == 0, "Should not recommend puts through earnings"
+
+    def test_put_allowed_when_no_earnings(self) -> None:
+        """Should recommend a put when earnings are far out."""
+        from src.main import build_recommendations
+        from tests.fixtures.market_data import (
+            make_market_context, make_price_history,
+            make_options_chain, make_event_calendar,
+        )
+        from src.models.signals import AlphaSignal
+        from src.models.enums import SignalType
+
+        sig = AlphaSignal(
+            symbol="MSFT",
+            signal_type=SignalType.SUPPORT_BOUNCE,
+            strength=70.0,
+            direction="sell_put",
+            reasoning="test",
+            expires=datetime.utcnow() + timedelta(hours=24),
+        )
+
+        mkt = make_market_context(symbol="MSFT", price=Decimal("390.00"))
+        hist = make_price_history(symbol="MSFT", current_price=Decimal("390.00"))
+        chain = make_options_chain(symbol="MSFT")
+        # Earnings in 60 days — well past 30-day target
+        cal = make_event_calendar(symbol="MSFT", next_earnings=date.today() + timedelta(days=60))
+        watchlist_data = [("MSFT", mkt, hist, chain, cal)]
+
+        recs = build_recommendations([sig], watchlist_data)
+        put_recs = [r for r in recs if r.symbol == "MSFT"]
+        assert len(put_recs) > 0, "Should recommend puts when earnings are far out"
+
+
+class TestHighIVTakeProfit:
+    """Short-dated positions in high IV should take profit earlier."""
+
+    def test_high_iv_short_dated_takes_profit_at_50pct(self) -> None:
+        """MU scenario: 64% captured, 31 DTE, IV rank 100 → TAKE PROFIT."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="MU", position_type="short_put", quantity=1,
+            strike=Decimal("320"), expiration=date(2026, 5, 15),
+            entry_price=Decimal("7.00"), current_price=Decimal("2.53"),
+            underlying_price=Decimal("420"), cost_basis=Decimal("32000"),
+            delta=-0.04, theta=0.01, gamma=0.001, vega=0.02, iv=0.77,
+            days_to_expiry=31,
+        )
+        ctx = make_intelligence_context(
+            symbol="MU",
+            quant=make_quant_intelligence(iv_rank=100.0, trend_direction="uptrend"),
+        )
+
+        result = review_position(pos, ctx)
+        assert result.action == "TAKE PROFIT"
+        assert "high iv" in result.reasoning.lower()
+
+    def test_deep_otm_long_dated_normal_iv_holds(self) -> None:
+        """Deep OTM with 185 DTE and normal IV should NOT take profit at 56%."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        pos = Position(
+            symbol="GOOG", position_type="short_put", quantity=1,
+            strike=Decimal("270"), expiration=date(2026, 10, 16),
+            entry_price=Decimal("20.00"), current_price=Decimal("8.80"),
+            underlying_price=Decimal("400"), cost_basis=Decimal("27000"),
+            delta=-0.04, theta=0.02, gamma=0.001, vega=0.03, iv=0.35,
+            days_to_expiry=185,
+        )
+        ctx = make_intelligence_context(
+            symbol="GOOG",
+            quant=make_quant_intelligence(iv_rank=45.0, trend_direction="range"),
+        )
+
+        result = review_position(pos, ctx)
+        # 56% captured but 185 DTE and moderate IV → should NOT take profit
+        assert result.action != "TAKE PROFIT"

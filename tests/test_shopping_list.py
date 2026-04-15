@@ -354,3 +354,39 @@ class TestConvictionModifier:
         # Sell on low → still low (can't go to skip via shopping list)
         assert result.conviction == "low"
         assert label is None  # no actual change
+
+
+class TestScannerIntegration:
+    def test_scanner_pick_has_shopping_list_fields(self) -> None:
+        from src.main import ScannerPick
+        pick = ScannerPick(
+            symbol="LLY",
+            price=710.0,
+            iv_rank=65.0,
+            rsi=32.0,
+            put_contract=None,
+            score=8.5,
+            reasons=["IV rank 65", "RSI 32"],
+            collateral_per_contract=67000.0,
+            ann_yield=0.15,
+            shopping_list_rating="Buy",
+            price_target="1,150-1,250",
+        )
+        assert pick.shopping_list_rating == "Buy"
+        assert pick.price_target == "1,150-1,250"
+
+    def test_scanner_pick_defaults_none(self) -> None:
+        from src.main import ScannerPick
+        pick = ScannerPick(
+            symbol="XYZ",
+            price=50.0,
+            iv_rank=40.0,
+            rsi=45.0,
+            put_contract=None,
+            score=5.0,
+            reasons=[],
+            collateral_per_contract=5000.0,
+            ann_yield=0.10,
+        )
+        assert pick.shopping_list_rating is None
+        assert pick.price_target is None

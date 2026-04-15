@@ -187,26 +187,57 @@ class ScannerPick:
     ann_yield: float  # annualized premium yield
     market_cap: float = 0.0  # in dollars, for tier labeling
     next_earnings: Any = None  # date | None — for earnings gate
+    shopping_list_rating: str | None = None    # e.g. "Buy", "Top 15 Stock"
+    price_target: str | None = None            # e.g. "$500-550"
 
 
 def scan_wheel_candidates(
     watchlist_symbols: set[str],
     etrade_session: object | None = None,
     max_picks: int = 8,
+    shopping_list: list[ShoppingListEntry] | None = None,
 ) -> list[ScannerPick]:
-    """Discover and screen wheel candidates dynamically. No static lists.
+    """Discover and screen wheel candidates dynamically.
 
-    Two-phase approach:
-    1. DISCOVER: Finviz screener finds high-vol optionable stocks (cached daily)
-    2. SCREEN: yfinance IV rank + options chain on top candidates only
-
-    This keeps the detailed (slow) screening to ~20 symbols max.
+    When shopping_list is provided, uses it as the primary discovery universe.
+    Falls back to Finviz if shopping list yields < 3 picks after screening.
     """
     from src.data.scanner_sources import discover_scanner_universe
     from src.data.market import calculate_iv_rank
+    from datetime import date
 
-    # Phase 1: Discover candidates from Finviz (cached, fast after first run)
-    candidates = discover_scanner_universe(watchlist_symbols, max_candidates=60)
+    candidates: list[str] = []
+    sl_metadata: dict[str, Any] = {}  # ticker → ShoppingListEntry
+
+    # Phase 1: Discover candidates
+    if shopping_list:
+        # Shopping list is primary universe
+        scored: list[tuple[str, float, ShoppingListEntry]] = []
+        for entry in shopping_list:
+            if entry.ticker in watchlist_symbols:
+                continue
+            if entry.rating_tier == 0:  # Sell
+                continue
+
+            # Composite score: rating_tier * 3 + freshness_bonus
+            freshness = 0.0
+            if entry.date_updated:
+                age = (date.today() - entry.date_updated).days
+                if age <= 30:
+                    freshness = 1.0
+                elif age <= 60:
+                    freshness = 0.5
+            score = entry.rating_tier * 3 + freshness
+            scored.append((entry.ticker, score, entry))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        candidates = [s[0] for s in scored[:40]]
+        sl_metadata = {s[0]: s[2] for s in scored}
+        log.info("scanner_shopping_list_candidates", count=len(candidates))
+    else:
+        # Fallback: Finviz discovery
+        candidates = discover_scanner_universe(watchlist_symbols, max_candidates=60)
+
     if not candidates:
         log.info("scanner_no_candidates")
         return []
@@ -372,9 +403,56 @@ def scan_wheel_candidates(
                 next_earnings=next_earn,
             ))
 
+            # Attach shopping list metadata if available
+            if picks and picks[-1].symbol in sl_metadata:
+                sl_entry = sl_metadata[picks[-1].symbol]
+                picks[-1].shopping_list_rating = sl_entry.rating
+                if sl_entry.price_target_2026:
+                    low, high = sl_entry.price_target_2026
+                    picks[-1].price_target = f"${low:,.0f}-{high:,.0f}"
+
         except Exception as e:
             log.debug("scanner_symbol_failed", symbol=symbol, error=str(e))
             continue
+
+    # Backfill from Finviz if shopping list yielded < 3 picks
+    if shopping_list and len(picks) < 3:
+        log.info("scanner_backfilling_finviz", shopping_list_picks=len(picks))
+        existing_symbols = {p.symbol for p in picks}
+        finviz_candidates = discover_scanner_universe(watchlist_symbols, max_candidates=60)
+        for symbol in finviz_candidates:
+            if symbol in existing_symbols or symbol in watchlist_symbols:
+                continue
+            try:
+                iv_data = calculate_iv_rank(symbol, 0)
+                iv_rank = iv_data["iv_rank"]
+                if iv_rank < 35:
+                    continue
+                import yfinance as yf
+                ticker = yf.Ticker(symbol)
+                hist = ticker.history(period="3mo")
+                if hist.empty or len(hist) < 20:
+                    continue
+                closes = [float(c) for c in hist["Close"]]
+                price = closes[-1]
+                from src.data.market import _calculate_rsi
+                rsi = _calculate_rsi(closes)
+                if rsi is not None and rsi > 65:
+                    continue
+                # Simplified scoring for backfill
+                score = iv_rank / 20
+                reasons = [f"IV rank {iv_rank:.0f}", "Scanner backfill"]
+                picks.append(ScannerPick(
+                    symbol=symbol, price=price, iv_rank=iv_rank, rsi=rsi,
+                    put_contract=None, score=score, reasons=reasons,
+                    collateral_per_contract=price * 100, ann_yield=0.0,
+                ))
+                existing_symbols.add(symbol)
+                if len(picks) >= max_picks:
+                    break
+            except Exception as e:
+                log.debug("scanner_backfill_failed", symbol=symbol, error=str(e))
+                continue
 
     # Sort by score descending, then by annualized yield
     picks.sort(key=lambda p: (p.score, p.ann_yield), reverse=True)

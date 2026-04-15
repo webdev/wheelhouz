@@ -16,6 +16,7 @@ from src.data.market import (
     fetch_market_context,
     fetch_price_history,
 )
+from src.data.shopping_list import fetch_shopping_list, resolve_ticker
 
 __all__ = [
     # Auth
@@ -33,4 +34,7 @@ __all__ = [
     "fetch_market_context",
     # Events
     "fetch_event_calendar",
+    # Shopping list
+    "fetch_shopping_list",
+    "resolve_ticker",
 ]

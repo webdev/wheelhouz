@@ -54,3 +54,129 @@ class TestShoppingListModels:
         )
         assert entry.near_actionable is True
         assert entry.current_price == Decimal("42.00")
+
+
+import pytest
+from datetime import datetime
+from unittest.mock import AsyncMock, patch, MagicMock
+from src.data.shopping_list import (
+    _parse_rating_tier,
+    _parse_price_target,
+    _parse_csv_rows,
+    _MANUAL_OVERRIDES,
+    resolve_ticker,
+)
+
+
+class TestCSVParsing:
+    def test_rating_tier_mapping(self) -> None:
+        assert _parse_rating_tier("Top Stock to Buy") == 5
+        assert _parse_rating_tier("Top 15 Stock") == 4
+        assert _parse_rating_tier("Buy") == 3
+        assert _parse_rating_tier("Borderline Buy") == 2
+        assert _parse_rating_tier("Hold/ Market Perform") == 1
+        assert _parse_rating_tier("Sell") == 0
+        assert _parse_rating_tier("Unknown Rating") == 1
+
+    def test_price_target_range(self) -> None:
+        result = _parse_price_target("500-550")
+        assert result == (Decimal("500"), Decimal("550"))
+
+    def test_price_target_with_commas(self) -> None:
+        result = _parse_price_target("1,150-1,250")
+        assert result == (Decimal("1150"), Decimal("1250"))
+
+    def test_price_target_single_value(self) -> None:
+        result = _parse_price_target("300")
+        assert result == (Decimal("300"), Decimal("300"))
+
+    def test_price_target_non_numeric(self) -> None:
+        assert _parse_price_target("2-2.2 billion market cap") is None
+        assert _parse_price_target("") is None
+        assert _parse_price_target("N/A") is None
+
+    def test_price_target_decimal_values(self) -> None:
+        result = _parse_price_target("42.50-55.00")
+        assert result == (Decimal("42.50"), Decimal("55.00"))
+
+    def test_manual_overrides_exist(self) -> None:
+        assert _MANUAL_OVERRIDES["Alphabet"] == "GOOG"
+        assert _MANUAL_OVERRIDES["Meta Platforms"] == "META"
+        assert _MANUAL_OVERRIDES["Taiwan Semi"] == "TSM"
+
+    def test_parse_csv_rows(self, monkeypatch) -> None:
+        from src.data import shopping_list as sl_mod
+        monkeypatch.setattr(sl_mod, "resolve_ticker", lambda name: {
+            "Alphabet": "GOOG", "Bad Corp": "BAD",
+        }.get(name.strip()))
+
+        rows = [
+            ["Alphabet", "Buy", "3/15/2026", "200-220", "4/1/2026", "250-280"],
+            ["Bad Corp", "Sell", "", "", "", ""],
+        ]
+        entries = sl_mod._parse_csv_rows(rows, today=date(2026, 4, 15))
+        assert len(entries) == 2
+        assert entries[0].name == "Alphabet"
+        assert entries[0].ticker == "GOOG"
+        assert entries[0].rating_tier == 3
+        assert entries[0].price_target_2026 == (Decimal("200"), Decimal("220"))
+        assert entries[0].stale is False
+        assert entries[1].rating == "Sell"
+        assert entries[1].rating_tier == 0
+
+    def test_stale_detection(self, monkeypatch) -> None:
+        from src.data import shopping_list as sl_mod
+        monkeypatch.setattr(sl_mod, "resolve_ticker", lambda name: "GOOG")
+
+        rows = [
+            ["Alphabet", "Buy", "12/1/2025", "200-220", "", ""],
+        ]
+        entries = sl_mod._parse_csv_rows(rows, today=date(2026, 4, 15))
+        assert entries[0].stale is True
+
+
+import asyncio
+
+
+class TestFetchShoppingList:
+    def test_fetch_from_cache(self, tmp_path, monkeypatch) -> None:
+        """When cache is fresh, fetch_shopping_list reads from cache."""
+        from src.data import shopping_list as sl_mod
+
+        monkeypatch.setattr(sl_mod, "resolve_ticker", lambda name: {
+            "Alphabet": "GOOG",
+        }.get(name.strip()))
+
+        cache_csv = (
+            "Name,Rating,Date Updated,2026 Price Target,As of Date,2027 Price Target\n"
+            "Alphabet,Buy,3/15/2026,200-220,,250-280\n"
+        )
+        cache_file = tmp_path / ".shopping_list_cache.csv"
+        cache_file.write_text(cache_csv)
+        ts_file = tmp_path / ".shopping_list_fetched"
+        ts_file.write_text(datetime.now().isoformat())
+
+        monkeypatch.setattr(sl_mod, "_CACHE_FILE", cache_file)
+        monkeypatch.setattr(sl_mod, "_TIMESTAMP_FILE", ts_file)
+        monkeypatch.setattr(
+            sl_mod, "load_trading_params",
+            lambda: {"shopping_list": {"url": "http://fake", "cache_ttl_hours": 24}},
+        )
+
+        entries = asyncio.run(sl_mod.fetch_shopping_list())
+        assert len(entries) >= 1
+        assert entries[0].ticker == "GOOG"
+
+    def test_fetch_returns_empty_on_no_data(self, tmp_path, monkeypatch) -> None:
+        """When no cache and fetch fails, returns empty list."""
+        from src.data import shopping_list as sl_mod
+
+        monkeypatch.setattr(sl_mod, "_CACHE_FILE", tmp_path / "missing.csv")
+        monkeypatch.setattr(sl_mod, "_TIMESTAMP_FILE", tmp_path / "missing_ts")
+        monkeypatch.setattr(
+            sl_mod, "load_trading_params",
+            lambda: {"shopping_list": {"url": "http://will-fail", "cache_ttl_hours": 24}},
+        )
+
+        entries = asyncio.run(sl_mod.fetch_shopping_list())
+        assert entries == []

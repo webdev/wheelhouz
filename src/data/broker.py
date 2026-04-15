@@ -432,6 +432,9 @@ def fetch_ytd_transactions(
         while True:
             _sleep()
             try:
+                # Use XML (default) — JSON suffix causes 401 on some E*Trade
+                # accounts. xmltodict converts the XML response to a dict
+                # with the same structure as JSON would return.
                 resp = session.accounts.list_transactions(
                     account_id,
                     start_date=jan1,
@@ -439,26 +442,31 @@ def fetch_ytd_transactions(
                     sort_order="DESC",
                     count=50,
                     marker=marker,
-                    resp_format="json",
+                    resp_format="xml",
                 )
             except Exception as e:
                 logger.warning("etrade_transactions_failed",
                                account_id=account_id, error=str(e))
                 break
 
-            if not resp or "TransactionListResponse" not in resp:
+            if not resp:
                 break
 
-            txn_list = resp["TransactionListResponse"].get("Transaction", [])
+            # XML response wraps in TransactionListResponse
+            txn_resp = resp.get("TransactionListResponse", resp)
+            txn_list = txn_resp.get("Transaction", [])
             if isinstance(txn_list, dict):
                 txn_list = [txn_list]
+
+            if not txn_list:
+                break
 
             for txn in txn_list:
                 txn["_account_id"] = account_id
             all_txns.extend(txn_list)
 
             # Pagination: marker for next page
-            marker = resp["TransactionListResponse"].get("marker")
+            marker = txn_resp.get("marker")
             if not marker:
                 break
 
@@ -487,8 +495,6 @@ def populate_tax_engine_from_transactions(
     open_premiums: dict[tuple[str, str], list[tuple[Decimal, date]]] = {}
 
     for txn in transactions:
-        txn_type = txn.get("transactionType", "")
-        amount = _decimal(txn.get("amount", 0))
         desc = txn.get("description", "")
         acct = txn.get("_account_id", "")
 
@@ -496,12 +502,13 @@ def populate_tax_engine_from_transactions(
         txn_date_str = txn.get("transactionDate")
         txn_date = _parse_txn_date(txn_date_str)
 
-        # Brokerage transactions contain the actual trade details
-        brokerage = txn.get("brokerage", {})
+        # Brokerage transactions contain the actual trade details.
+        # XML (xmltodict) uses "Brokerage", JSON uses "brokerage".
+        brokerage = txn.get("brokerage") or txn.get("Brokerage") or {}
         if not brokerage:
             continue
 
-        product = brokerage.get("product", {})
+        product = brokerage.get("product") or brokerage.get("Product") or {}
         sec_type = product.get("securityType", "")
         quantity = abs(int(float(brokerage.get("quantity", 0) or 0)))
         price = _decimal(brokerage.get("price", 0))

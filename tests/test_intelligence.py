@@ -1505,7 +1505,25 @@ class TestOpportunitiesSection:
             sma_200=Decimal("192"), sma_50=Decimal("198"),
             rsi_14=38.0,
         )
-        chain = make_options_chain(symbol="AAPL")
+        from src.models.market import OptionContract
+        exp_date = date.today() + timedelta(days=37)
+        chain = make_options_chain(
+            symbol="AAPL",
+            puts=[
+                OptionContract(
+                    strike=Decimal("185"), expiration=exp_date,
+                    option_type="put", bid=Decimal("2.10"), ask=Decimal("2.30"),
+                    mid=Decimal("2.20"), volume=500, open_interest=2000,
+                    implied_vol=0.28, delta=-0.22,
+                ),
+                OptionContract(
+                    strike=Decimal("180"), expiration=exp_date,
+                    option_type="put", bid=Decimal("1.50"), ask=Decimal("1.70"),
+                    mid=Decimal("1.60"), volume=300, open_interest=1500,
+                    implied_vol=0.30, delta=-0.16,
+                ),
+            ],
+        )
         cal = make_event_calendar(
             symbol="AAPL",
             next_earnings=date.today() + timedelta(days=60),  # far out
@@ -1542,6 +1560,12 @@ class TestOpportunitiesSection:
         assert "OPPORTUNITIES" in clean
         assert "AAPL" in clean
         assert "$150,000 cash available" in clean
+        # Option contract details should appear for SELL PUT
+        assert "Strike: $185" in clean
+        assert "37d" in clean
+        assert "Bid: $2.10" in clean
+        assert "Delta: 0.22" in clean
+        assert "Premium: $2.20/contract" in clean
 
     def test_no_opportunities_when_no_cash(self) -> None:
         """No cash = no OPPORTUNITIES section."""

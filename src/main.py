@@ -627,17 +627,21 @@ def format_local_briefing(
     if recommendations:
         rec_symbols.update(r.symbol for r in recommendations)
 
-    opportunities: list[tuple[str, str, str, list[str]]] = []  # (symbol, type, reason, details)
+    # (symbol, type, reason, details, option_contract_or_None)
+    opportunities: list[tuple[str, str, str, list[str], "OptionContract | None"]] = []
 
     cash = portfolio_state.cash_available if portfolio_state else Decimal("0")
     nlv = portfolio_state.net_liquidation if portfolio_state else Decimal("0")
 
-    # TV consensus and intel by symbol
+    # TV consensus and options intel by symbol
     tv_by_sym: dict[str, str] = {}
+    options_intel_by_sym: dict[str, "OptionsIntelligence"] = {}
     if intel_contexts:
         for ctx in intel_contexts:
             if ctx.technical_consensus:
                 tv_by_sym[ctx.symbol] = ctx.technical_consensus.overall
+            if ctx.options:
+                options_intel_by_sym[ctx.symbol] = ctx.options
 
     for symbol, mkt, hist, chain, cal in watchlist_data:
         if symbol in rec_symbols:
@@ -732,8 +736,26 @@ def format_local_briefing(
             rec_type = "BUY SHARES"
             reason = "Near support with positive technicals"
 
+        # For SELL PUT, find the best put contract from the chain
+        best_put = None
+        if rec_type == "SELL PUT" and chain and chain.puts:
+            # Target: 0.20-0.30 delta, 30-45 DTE
+            today = date.today()
+            candidates = [
+                p for p in chain.puts
+                if 0.10 <= abs(p.delta) <= 0.35
+                and 20 <= (p.expiration - today).days <= 55
+                and p.bid > 0
+            ]
+            if candidates:
+                # Prefer closest to 0.25 delta in the 30-45 DTE range
+                best_put = min(
+                    candidates,
+                    key=lambda p: (abs(abs(p.delta) - 0.25) + abs((p.expiration - today).days - 37) / 100)
+                )
+
         if rec_type:
-            opportunities.append((symbol, rec_type, reason, details))
+            opportunities.append((symbol, rec_type, reason, details, best_put))
 
     # Sort by detail count (proxy for conviction) descending
     opportunities.sort(key=lambda x: len(x[3]), reverse=True)
@@ -742,7 +764,7 @@ def format_local_briefing(
         lines.append(f"\n{_C.green(_C.bold('━━ OPPORTUNITIES ━━'))} "
                      f"{_C.dim(f'— ${cash:,.0f} cash available')}")
 
-        for symbol, rec_type, reason, details in opportunities[:8]:  # cap at 8
+        for symbol, rec_type, reason, details, put_contract in opportunities[:8]:
             _, mkt, hist, _, _ = next(
                 (w for w in watchlist_data if w[0] == symbol), (None,)*5
             )
@@ -754,19 +776,48 @@ def format_local_briefing(
             if details:
                 lines.append(f"    {' | '.join(details)}")
 
+            # Option contract details for SELL PUT
+            if rec_type == "SELL PUT" and put_contract:
+                dte = (put_contract.expiration - date.today()).days
+                mid = float(put_contract.mid)
+                bid = float(put_contract.bid)
+                strike_f = float(put_contract.strike)
+                yield_on_cap = (mid / strike_f) * 100 if strike_f > 0 else 0
+                ann_yield = yield_on_cap * (365 / dte) if dte > 0 else 0
+                lines.append(
+                    f"    {_C.bold('Strike')}: ${put_contract.strike} "
+                    f"| {_C.bold('Exp')}: {put_contract.expiration.strftime('%b %d')} ({dte}d) "
+                    f"| {_C.bold('Bid')}: ${bid:.2f} "
+                    f"| {_C.bold('Delta')}: {abs(put_contract.delta):.2f}"
+                )
+                lines.append(
+                    f"    Premium: ${mid:.2f}/contract "
+                    f"| Yield: {yield_on_cap:.1f}% ({ann_yield:.0f}% ann)"
+                )
+
             # Sizing hint based on available cash
             if nlv > 0:
-                # Conservative: 1-2% of NLV per position
                 suggested = float(nlv) * 0.015
                 if rec_type == "BUY SHARES":
                     shares = int(suggested / price) if price > 0 else 0
                     if shares > 0:
                         lines.append(f"    Size: ~{shares} shares (${shares * price:,.0f}, "
                                      f"~{shares * price / float(nlv):.1%} NLV)")
+                elif put_contract:
+                    strike_f = float(put_contract.strike)
+                    contracts = max(1, int(suggested / (strike_f * 100))) if strike_f > 0 else 1
+                    collateral = Decimal(contracts) * put_contract.strike * 100
+                    total_premium = Decimal(contracts) * put_contract.mid * 100
+                    lines.append(
+                        f"    Size: {contracts}x ${put_contract.strike} puts "
+                        f"(${collateral:,.0f} collateral, ${total_premium:,.0f} premium, "
+                        f"~{float(collateral) / float(nlv):.1%} NLV)"
+                    )
                 else:
+                    # SELL PUT without chain data — fallback to price-based estimate
                     contracts = max(1, int(suggested / (price * 100))) if price > 0 else 1
                     collateral = contracts * price * 100
-                    lines.append(f"    Size: {contracts}x puts (${collateral:,.0f} collateral, "
+                    lines.append(f"    Size: ~{contracts}x puts (${collateral:,.0f} collateral, "
                                  f"~{collateral / float(nlv):.1%} NLV)")
 
     # ── WATCH — position holds + earnings + tax ──

@@ -1626,7 +1626,12 @@ async def run_analysis_cycle(
         analyst_brief = await generate_analyst_brief(contexts_with_signals, regime_str)
 
     # 7. Build sized recommendations from signals (TV adjusts conviction)
-    recommendations = build_recommendations(all_signals, watchlist_data, intel_contexts=intel_contexts)
+    # Pass portfolio_state so covered call eligibility (owned shares) is checked
+    recommendations = build_recommendations(
+        all_signals, watchlist_data,
+        portfolio=portfolio_state,
+        intel_contexts=intel_contexts,
+    )
 
     # 8. Risk checks + YTD P&L from E*Trade transactions
     router = AccountRouter()

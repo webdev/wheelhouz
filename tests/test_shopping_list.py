@@ -163,7 +163,8 @@ class TestFetchShoppingList:
         cache_file = tmp_path / ".shopping_list_cache.csv"
         cache_file.write_text(cache_csv)
         ts_file = tmp_path / ".shopping_list_fetched"
-        ts_file.write_text(datetime.now().isoformat())
+        from datetime import timezone as _tz
+        ts_file.write_text(datetime.now(_tz.utc).isoformat())
 
         monkeypatch.setattr(sl_mod, "_CACHE_FILE", cache_file)
         monkeypatch.setattr(sl_mod, "_TIMESTAMP_FILE", ts_file)

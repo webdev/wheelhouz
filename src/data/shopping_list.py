@@ -6,7 +6,7 @@ import csv
 import io
 import json
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -104,9 +104,10 @@ def resolve_ticker(name: str) -> str | None:
 
     Checks manual overrides first, then persistent cache, then yfinance.
     Public API — exported via src/data/__init__.py.
+
+    WARNING: This function is synchronous and may block on yfinance I/O.
+    Call from a thread (asyncio.to_thread) when used in async context.
     """
-    if name in _MANUAL_OVERRIDES:
-        return _MANUAL_OVERRIDES[name]
     stripped = name.strip()
     if stripped in _MANUAL_OVERRIDES:
         return _MANUAL_OVERRIDES[stripped]
@@ -152,7 +153,7 @@ def _parse_csv_rows(
 ) -> list[ShoppingListEntry]:
     """Parse CSV data rows into ShoppingListEntry objects.
 
-    Columns: 0=Name, 1=Rating, 2=Date Updated, 3=2026 Target, 5=2027 Target.
+    Columns: 0=Name, 1=Rating, 2=Date Updated, 3=2026 Target, 4=As-of Date (skipped), 5=2027 Target.
     """
     if today is None:
         today = date.today()
@@ -200,7 +201,7 @@ def _cache_is_fresh(ttl_hours: int = 24) -> bool:
         return False
     try:
         ts = datetime.fromisoformat(_TIMESTAMP_FILE.read_text().strip())
-        return datetime.now() - ts < timedelta(hours=ttl_hours)
+        return datetime.now(timezone.utc) - ts < timedelta(hours=ttl_hours)
     except (ValueError, OSError):
         return False
 
@@ -229,7 +230,7 @@ async def fetch_shopping_list(
                 resp.raise_for_status()
                 csv_text = resp.text
                 _CACHE_FILE.write_text(csv_text)
-                _TIMESTAMP_FILE.write_text(datetime.now().isoformat())
+                _TIMESTAMP_FILE.write_text(datetime.now(timezone.utc).isoformat())
                 log.info("shopping_list_fetched", bytes=len(csv_text))
         except Exception as e:
             log.warning("shopping_list_fetch_failed", error=str(e))
@@ -240,7 +241,7 @@ async def fetch_shopping_list(
                         ts = datetime.fromisoformat(
                             _TIMESTAMP_FILE.read_text().strip()
                         )
-                        age_days = (datetime.now() - ts).days
+                        age_days = (datetime.now(timezone.utc) - ts).days
                         if age_days > 7:
                             log.error(
                                 "shopping_list_stale_cache",

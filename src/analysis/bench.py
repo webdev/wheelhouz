@@ -110,6 +110,26 @@ async def build_bench(
         log.warning("bench_yf_download_failed", error=str(e))
         return []
 
+    # Fetch earnings dates concurrently for all candidates
+    def _get_earnings(t: str) -> date | None:
+        try:
+            tk = yf.Ticker(t)
+            cal = tk.calendar
+            if cal is not None and not cal.empty:
+                earnings_dates = cal.get("Earnings Date")
+                if earnings_dates is not None and len(earnings_dates) > 0:
+                    ed = earnings_dates[0]
+                    return ed.date() if hasattr(ed, 'date') else None
+        except Exception:
+            pass
+        return None
+
+    earnings_tasks = [asyncio.to_thread(_get_earnings, t) for t in tickers]
+    earnings_results = await asyncio.gather(*earnings_tasks, return_exceptions=True)
+    earnings_by_ticker: dict[str, date | None] = {}
+    for t, result in zip(tickers, earnings_results):
+        earnings_by_ticker[t] = result if isinstance(result, date) else None
+
     bench_entries: list[tuple[float, BenchEntry]] = []
 
     for ticker in tickers:
@@ -135,7 +155,10 @@ async def build_bench(
             rs = gain.iloc[-1] / loss.iloc[-1] if loss.iloc[-1] != 0 else 100
             rsi = float(100 - (100 / (1 + rs)))
 
-            # IV rank proxy from 252-day HV
+            # IV rank proxy — rough approximation using HV percentile.
+            # hv_min uses 60-day window * 0.5 as a floor estimate since we only
+            # have 3mo of data, not a full 252-day range. This biases IV rank
+            # slightly upward but is acceptable for bench screening (not trade sizing).
             if len(close) >= 20:
                 returns = close.pct_change().dropna()
                 hv_20 = float(returns.tail(20).std() * (252 ** 0.5) * 100)
@@ -145,22 +168,7 @@ async def build_bench(
             else:
                 iv_rank = 50.0
 
-            # Next earnings (yfinance — sync call, run in thread)
-            next_earnings_date = None
-            try:
-                def _get_earnings(t: str) -> date | None:
-                    tk = yf.Ticker(t)
-                    cal = tk.calendar
-                    if cal is not None and not cal.empty:
-                        earnings_dates = cal.get("Earnings Date")
-                        if earnings_dates is not None and len(earnings_dates) > 0:
-                            ed = earnings_dates[0]
-                            return ed.date() if hasattr(ed, 'date') else None
-                    return None
-                next_earnings_date = await asyncio.to_thread(_get_earnings, ticker)
-            except Exception:
-                pass
-
+            next_earnings_date = earnings_by_ticker.get(ticker)
             upside = _upside_pct(entry, current_price)
 
             # Price target display string

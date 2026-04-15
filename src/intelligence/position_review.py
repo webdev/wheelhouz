@@ -29,6 +29,14 @@ _PUT_DELTA_HIGH_IV_TARGET = 0.16  # go further OTM when IV is elevated
 _PUT_DELTA_HIGH_IV_MAX = 0.22
 _HIGH_IV_THRESHOLD = 60        # IV rank above this = high IV environment
 _MAX_RISK_REWARD = 3.0         # block rolls where 10% drop loss > 3x premium
+_LARGE_PROFIT_THRESHOLD = Decimal("2000")  # flag positions with $2K+ captured
+
+# Stocks that routinely move 10%+ on earnings — stronger close recommendation
+_HIGH_VOL_EARNINGS_MOVERS = frozenset({
+    "TSLA", "NVDA", "META", "NFLX", "SNAP", "ROKU", "SHOP", "COIN",
+    "PLTR", "AFRM", "UPST", "MARA", "RIOT", "SMCI", "ARM", "MU",
+    "SOFI", "HOOD", "RBLX", "PINS", "TTD", "CRWD", "DDOG", "NET",
+})
 
 
 @dataclass
@@ -492,15 +500,33 @@ def review_position(
     # 3. WATCH CLOSELY checks — every reason must say WHAT TO DO
     watch_reasons: list[str] = []
 
+    # 3a. Large absolute profit that didn't hit % threshold
+    if is_short and pnl > 0:
+        profit_dollars = pnl * 100 * position.quantity
+        if profit_dollars >= _LARGE_PROFIT_THRESHOLD and pnl_pct < take_profit_threshold:
+            watch_reasons.append(
+                f"${profit_dollars:,.0f} profit captured ({pnl_pct:.0%}) with "
+                f"{position.days_to_expiry}d left — consider closing to lock in gains, "
+                f"especially before any catalyst")
+
     # Earnings within window but long-dated
     if earnings_before_expiry and position.days_to_expiry > 30:
         days_to_earnings = (earnings_date - date.today()).days
         # Prescriptive advice depends on moneyness and P&L
         if pos_delta < 0.10 and pnl_pct >= 0.40:
-            watch_reasons.append(
-                f"Earnings in {days_to_earnings}d. Deep OTM with {pnl_pct:.0%} captured — "
-                f"safe to hold through report unless gap risk concerns you. "
-                f"Close before if you want to lock in profit")
+            is_big_mover = position.symbol in _HIGH_VOL_EARNINGS_MOVERS
+            profit_dollars = pnl * 100 * position.quantity
+            if is_big_mover and pnl_pct >= 0.50:
+                # High-vol names with significant profit: recommend closing
+                watch_reasons.append(
+                    f"Earnings in {days_to_earnings}d. {position.symbol} routinely moves "
+                    f"10%+ on reports — close to lock in ${profit_dollars:,.0f} profit "
+                    f"({pnl_pct:.0%} captured) and re-sell after IV crush")
+            else:
+                watch_reasons.append(
+                    f"Earnings in {days_to_earnings}d. Deep OTM with {pnl_pct:.0%} captured — "
+                    f"safe to hold through report unless gap risk concerns you. "
+                    f"Close before if you want to lock in profit")
         elif pnl_pct >= 0.30:
             watch_reasons.append(
                 f"Earnings in {days_to_earnings}d with {pnl_pct:.0%} captured. "

@@ -1373,6 +1373,111 @@ class TestHighIVTakeProfit:
         assert result.action != "TAKE PROFIT"
 
 
+class TestLargeDollarProfit:
+    """Positions with large absolute profit get a 'consider closing' note."""
+
+    def test_large_profit_adds_watch_reason(self) -> None:
+        from src.intelligence.position_review import review_position
+        from src.models.position import Position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+
+        # MU Aug $300 put: entry $40.80, current $15.08 → $2,572 profit (63%)
+        # Deep OTM needs 80% for TAKE PROFIT, so this stays in WATCH
+        # But $2,572 is a lot of money — should mention it
+        pos = Position(
+            symbol="MU", position_type="short_put", quantity=1,
+            strike=Decimal("300"), expiration=date(2026, 8, 21),
+            entry_price=Decimal("40.80"), current_price=Decimal("15.08"),
+            underlying_price=Decimal("115"), cost_basis=Decimal("4080"),
+            delta=-0.03, theta=0.01, gamma=0.001, vega=0.02, iv=0.45,
+            days_to_expiry=129,
+        )
+        ctx = make_intelligence_context(
+            symbol="MU",
+            quant=make_quant_intelligence(iv_rank=50.0, trend_direction="range"),
+        )
+        result = review_position(pos, ctx)
+        assert result.action == "WATCH CLOSELY"
+        assert "$2,572" in result.reasoning or "2,572" in result.reasoning
+
+    def test_small_profit_no_mention(self) -> None:
+        from src.intelligence.position_review import review_position
+        from src.models.position import Position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+
+        # $500 profit → below $2,000 threshold, shouldn't add the note
+        pos = Position(
+            symbol="AAPL", position_type="short_put", quantity=1,
+            strike=Decimal("200"), expiration=date(2026, 8, 21),
+            entry_price=Decimal("8.00"), current_price=Decimal("3.00"),
+            underlying_price=Decimal("230"), cost_basis=Decimal("800"),
+            delta=-0.08, theta=0.01, gamma=0.001, vega=0.02, iv=0.30,
+            days_to_expiry=129,
+        )
+        ctx = make_intelligence_context(
+            symbol="AAPL",
+            quant=make_quant_intelligence(iv_rank=40.0, trend_direction="range"),
+        )
+        result = review_position(pos, ctx)
+        # Should not mention "consider closing" for a small profit
+        assert "consider closing" not in result.reasoning
+
+
+class TestHighVolEarningsMovers:
+    """High-volatility names get stronger close recommendation near earnings."""
+
+    def test_tsla_earnings_recommends_close(self) -> None:
+        from src.intelligence.position_review import review_position
+        from src.models.position import Position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from tests.fixtures.market_data import make_event_calendar
+
+        pos = Position(
+            symbol="TSLA", position_type="short_call", quantity=2,
+            strike=Decimal("425"), expiration=date(2026, 5, 15),
+            entry_price=Decimal("8.50"), current_price=Decimal("3.55"),
+            underlying_price=Decimal("250"), cost_basis=Decimal("1700"),
+            delta=-0.02, theta=0.03, gamma=0.001, vega=0.02, iv=0.50,
+            days_to_expiry=31,
+        )
+        ctx = make_intelligence_context(
+            symbol="TSLA",
+            quant=make_quant_intelligence(iv_rank=21.0, trend_direction="range"),
+            events=make_event_calendar(
+                next_earnings=date.today() + timedelta(days=8),
+            ),
+        )
+        result = review_position(pos, ctx)
+        assert result.action == "WATCH CLOSELY"
+        assert "routinely moves" in result.reasoning or "10%+" in result.reasoning
+
+    def test_non_volatile_name_says_safe_to_hold(self) -> None:
+        from src.intelligence.position_review import review_position
+        from src.models.position import Position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from tests.fixtures.market_data import make_event_calendar
+
+        # GOOG is NOT in the high-vol list, should say "safe to hold"
+        pos = Position(
+            symbol="GOOG", position_type="short_put", quantity=1,
+            strike=Decimal("270"), expiration=date(2026, 10, 16),
+            entry_price=Decimal("20.00"), current_price=Decimal("8.80"),
+            underlying_price=Decimal("400"), cost_basis=Decimal("2000"),
+            delta=-0.04, theta=0.02, gamma=0.001, vega=0.03, iv=0.35,
+            days_to_expiry=185,
+        )
+        ctx = make_intelligence_context(
+            symbol="GOOG",
+            quant=make_quant_intelligence(iv_rank=45.0, trend_direction="range"),
+            events=make_event_calendar(
+                next_earnings=date.today() + timedelta(days=15),
+            ),
+        )
+        result = review_position(pos, ctx)
+        assert result.action == "WATCH CLOSELY"
+        assert "safe to hold" in result.reasoning
+
+
 class TestYTDOrderParsing:
     """Tests for E*Trade order parsing → TaxEngine population."""
 

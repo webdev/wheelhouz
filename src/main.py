@@ -673,6 +673,22 @@ def format_local_briefing(
         for alert in tax_alerts:
             lines.append(f"  Tax: {alert}")
 
+    # Concentration warnings (cross-position)
+    if position_reviews:
+        from collections import Counter
+        sym_counts = Counter(p.symbol for p in position_reviews)
+        concentrated = [(sym, cnt) for sym, cnt in sym_counts.items() if cnt >= 2]
+        if concentrated:
+            if not has_watch:
+                lines.append(f"\n{_C.yellow(_C.bold('━━ WATCH ━━'))}")
+            lines.append("")
+            for sym, cnt in sorted(concentrated, key=lambda x: -x[1]):
+                sym_positions = [p for p in position_reviews if p.symbol == sym]
+                total_exposure = sum(abs(p.current_pnl) + abs(p.entry_price * 100 * p.quantity)
+                                     for p in sym_positions)
+                lines.append(f"  {_C.yellow('!!')} {_C.bold(sym)}: {cnt} open option positions — "
+                             f"watch single-name concentration (max 10% NLV)")
+
     # ── Nothing to do ──
     if not (urgent_positions or high_trades or medium_trades or low_trades
             or watch_positions):

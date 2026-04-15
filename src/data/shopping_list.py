@@ -51,10 +51,10 @@ _MANUAL_OVERRIDES: dict[str, str] = {
     "Lumen Tech": "LUMN",
     "Luminar Tech": "LAZR",
     "S&P Global": "SPGI",
-    "Corning ": "GLW",
-    "Exxon ": "XOM",
-    "Cameco ": "CCJ",
-    "PACCAR ": "PCAR",
+    "Corning": "GLW",
+    "Exxon": "XOM",
+    "Cameco": "CCJ",
+    "PACCAR": "PCAR",
 }
 
 
@@ -268,6 +268,7 @@ async def fetch_shopping_list(
     if rows and rows[0] and rows[0][0].strip() == "Name":
         rows = rows[1:]
 
-    entries = _parse_csv_rows(rows)
+    import asyncio
+    entries = await asyncio.to_thread(_parse_csv_rows, rows)
     log.info("shopping_list_parsed", entries=len(entries))
     return entries

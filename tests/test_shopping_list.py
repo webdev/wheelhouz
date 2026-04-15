@@ -62,6 +62,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from src.data.shopping_list import (
     _parse_rating_tier,
     _parse_price_target,
+    _parse_date,
     _parse_csv_rows,
     _MANUAL_OVERRIDES,
     resolve_ticker,
@@ -98,6 +99,14 @@ class TestCSVParsing:
     def test_price_target_decimal_values(self) -> None:
         result = _parse_price_target("42.50-55.00")
         assert result == (Decimal("42.50"), Decimal("55.00"))
+
+    def test_parse_date_formats(self) -> None:
+        assert _parse_date("3/15/2026") == date(2026, 3, 15)
+        assert _parse_date("12/1/2025") == date(2025, 12, 1)
+        assert _parse_date("3/15/26") == date(2026, 3, 15)
+        assert _parse_date("2026-03-15") == date(2026, 3, 15)
+        assert _parse_date("") is None
+        assert _parse_date("not-a-date") is None
 
     def test_manual_overrides_exist(self) -> None:
         assert _MANUAL_OVERRIDES["Alphabet"] == "GOOG"

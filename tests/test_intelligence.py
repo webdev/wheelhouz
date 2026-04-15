@@ -1371,3 +1371,246 @@ class TestHighIVTakeProfit:
         result = review_position(pos, ctx)
         # 56% captured but 185 DTE and moderate IV → should NOT take profit
         assert result.action != "TAKE PROFIT"
+
+
+class TestYTDTransactionParsing:
+    """Tests for E*Trade transaction parsing → TaxEngine population."""
+
+    def test_sold_option_adds_premium_income(self) -> None:
+        from src.data.broker import populate_tax_engine_from_transactions
+
+        txns = [{
+            "transactionType": "Trade",
+            "amount": "150.00",
+            "description": "SOLD 1 AAPL 100 (Weeklys) 04/18/2026 Put $220",
+            "transactionDate": None,
+            "brokerage": {
+                "product": {"securityType": "OPTN", "symbol": "AAPL", "callPut": "PUT"},
+                "transactionType": "Sold Short",
+                "quantity": "1",
+                "price": "1.50",
+            },
+            "_account_id": "acct1",
+        }]
+        engine = populate_tax_engine_from_transactions(txns)
+        assert engine.option_premium_income_ytd == Decimal("150")
+
+    def test_buy_to_close_records_profit(self) -> None:
+        from src.data.broker import populate_tax_engine_from_transactions
+
+        txns = [
+            {
+                "transactionType": "Trade",
+                "amount": "300.00",
+                "description": "SOLD 1 MSFT 100 05/16/2026 Put $400",
+                "transactionDate": None,
+                "brokerage": {
+                    "product": {"securityType": "OPTN", "symbol": "MSFT", "callPut": "PUT"},
+                    "transactionType": "Sold Short",
+                    "quantity": "1",
+                    "price": "3.00",
+                },
+                "_account_id": "acct1",
+            },
+            {
+                "transactionType": "Trade",
+                "amount": "-80.00",
+                "description": "SOLD 1 MSFT 100 05/16/2026 Put $400",
+                "transactionDate": None,
+                "brokerage": {
+                    "product": {"securityType": "OPTN", "symbol": "MSFT", "callPut": "PUT"},
+                    "transactionType": "Bought to Cover",
+                    "quantity": "1",
+                    "price": "0.80",
+                },
+                "_account_id": "acct1",
+            },
+        ]
+        engine = populate_tax_engine_from_transactions(txns)
+        # Sold for $300, bought back for $80 → $220 profit
+        assert engine.realized_stcg_ytd == Decimal("220")
+        assert engine.option_premium_income_ytd == Decimal("300")
+
+    def test_buy_to_close_at_loss_records_loss(self) -> None:
+        from src.data.broker import populate_tax_engine_from_transactions
+
+        txns = [
+            {
+                "transactionType": "Trade",
+                "description": "SOLD 1 TSLA 100 05/16/2026 Put $200",
+                "transactionDate": None,
+                "brokerage": {
+                    "product": {"securityType": "OPTN", "symbol": "TSLA", "callPut": "PUT"},
+                    "transactionType": "Sold Short",
+                    "quantity": "1",
+                    "price": "2.00",
+                },
+                "_account_id": "acct1",
+            },
+            {
+                "transactionType": "Trade",
+                "description": "SOLD 1 TSLA 100 05/16/2026 Put $200",
+                "transactionDate": 1713052800000,  # epoch ms
+                "brokerage": {
+                    "product": {"securityType": "OPTN", "symbol": "TSLA", "callPut": "PUT"},
+                    "transactionType": "Bought to Cover",
+                    "quantity": "1",
+                    "price": "5.00",
+                },
+                "_account_id": "acct1",
+            },
+        ]
+        engine = populate_tax_engine_from_transactions(txns)
+        # Sold for $200, bought back for $500 → $300 loss
+        assert engine.realized_losses_ytd == Decimal("300")
+        assert engine.option_premium_income_ytd == Decimal("200")
+
+    def test_expired_option_full_profit(self) -> None:
+        from src.data.broker import populate_tax_engine_from_transactions
+
+        txns = [
+            {
+                "transactionType": "Trade",
+                "description": "SOLD 2 NVDA 100 04/11/2026 Put $100",
+                "transactionDate": None,
+                "brokerage": {
+                    "product": {"securityType": "OPTN", "symbol": "NVDA", "callPut": "PUT"},
+                    "transactionType": "Sold Short",
+                    "quantity": "2",
+                    "price": "1.25",
+                },
+                "_account_id": "acct1",
+            },
+            {
+                "transactionType": "Expired",
+                "description": "SOLD 2 NVDA 100 04/11/2026 Put $100",
+                "transactionDate": None,
+                "brokerage": {
+                    "product": {"securityType": "OPTN", "symbol": "NVDA", "callPut": "PUT"},
+                    "transactionType": "Expired",
+                    "quantity": "2",
+                    "price": "0",
+                },
+                "_account_id": "acct1",
+            },
+        ]
+        engine = populate_tax_engine_from_transactions(txns)
+        # 2 contracts × $1.25 × 100 = $250 premium, expired = full profit
+        assert engine.realized_stcg_ytd == Decimal("250")
+        assert engine.option_premium_income_ytd == Decimal("250")
+
+    def test_non_option_transactions_ignored(self) -> None:
+        from src.data.broker import populate_tax_engine_from_transactions
+
+        txns = [{
+            "transactionType": "Trade",
+            "description": "BOUGHT 10 AAPL",
+            "transactionDate": None,
+            "brokerage": {
+                "product": {"securityType": "EQ", "symbol": "AAPL"},
+                "transactionType": "Bought",
+                "quantity": "10",
+                "price": "175.00",
+            },
+            "_account_id": "acct1",
+        }]
+        engine = populate_tax_engine_from_transactions(txns)
+        assert engine.option_premium_income_ytd == Decimal("0")
+        assert engine.realized_stcg_ytd == Decimal("0")
+
+    def test_loss_close_records_wash_sale(self) -> None:
+        from src.data.broker import populate_tax_engine_from_transactions
+        import time as _time
+
+        # Use a recent epoch ms (today minus 5 days) so the 30-day window is active
+        recent_epoch_ms = int((_time.time() - 5 * 86400) * 1000)
+
+        txns = [
+            {
+                "transactionType": "Trade",
+                "description": "SOLD 1 AMZN 100 05/16/2026 Put $230",
+                "transactionDate": None,
+                "brokerage": {
+                    "product": {"securityType": "OPTN", "symbol": "AMZN", "callPut": "PUT"},
+                    "transactionType": "Sold Short",
+                    "quantity": "1",
+                    "price": "1.00",
+                },
+                "_account_id": "acct1",
+            },
+            {
+                "transactionType": "Trade",
+                "description": "SOLD 1 AMZN 100 05/16/2026 Put $230",
+                "transactionDate": recent_epoch_ms,
+                "brokerage": {
+                    "product": {"securityType": "OPTN", "symbol": "AMZN", "callPut": "PUT"},
+                    "transactionType": "Bought to Cover",
+                    "quantity": "1",
+                    "price": "3.00",
+                },
+                "_account_id": "acct1",
+            },
+        ]
+        engine = populate_tax_engine_from_transactions(txns)
+        assert engine.realized_losses_ytd == Decimal("200")
+        blocked = engine.wash_sale_tracker.get_blocked_tickers()
+        assert "AMZN" in blocked
+
+    def test_briefing_shows_ytd_pnl_in_header(self) -> None:
+        """YTD P&L line appears in the briefing header when tax_engine provided."""
+        from src.models.tax import TaxEngine
+
+        tax_engine = TaxEngine(
+            option_premium_income_ytd=Decimal("5000"),
+            realized_stcg_ytd=Decimal("3500"),
+            realized_losses_ytd=Decimal("800"),
+        )
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+
+        regime = RegimeState(
+            regime="hold", vix=20.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70,
+            timestamp=datetime.utcnow(),
+        )
+        briefing = format_local_briefing(
+            regime=regime, vix=20.0, spy_change=0.005,
+            all_signals=[], watchlist_data=[], tax_alerts=[],
+            tax_engine=tax_engine,
+        )
+        # Strip ANSI for easy checking
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
+        assert "YTD Options P&L" in clean
+        assert "$+2,700" in clean  # 3500 - 800 = 2700
+        assert "$5,000" in clean  # premium
+
+    def test_briefing_shows_ytd_detail_section(self) -> None:
+        """Full YTD OPTIONS P&L section appears with breakdown."""
+        from src.models.tax import TaxEngine
+
+        tax_engine = TaxEngine(
+            option_premium_income_ytd=Decimal("12000"),
+            realized_stcg_ytd=Decimal("8000"),
+            realized_losses_ytd=Decimal("2000"),
+        )
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+
+        regime = RegimeState(
+            regime="hold", vix=20.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70,
+            timestamp=datetime.utcnow(),
+        )
+        briefing = format_local_briefing(
+            regime=regime, vix=20.0, spy_change=0.005,
+            all_signals=[], watchlist_data=[], tax_alerts=[],
+            tax_engine=tax_engine,
+        )
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
+        assert "YTD OPTIONS P&L" in clean
+        assert "Premium collected" in clean
+        assert "$12,000" in clean
+        assert "Realized gains" in clean
+        assert "Net realized" in clean

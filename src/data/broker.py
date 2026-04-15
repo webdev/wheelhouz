@@ -1,4 +1,4 @@
-"""E*Trade broker client — portfolio, quotes, option chains.
+"""E*Trade broker client — portfolio, quotes, option chains, transactions.
 
 Converts raw E*Trade API responses into shared models.
 Rate-limited: 0.3s between requests (4 req/s market, 2 req/s account).
@@ -16,6 +16,7 @@ import structlog
 from src.data.auth import ETradeSession
 from src.models.market import OptionsChain
 from src.models.position import PortfolioState, Position
+from src.models.tax import TaxEngine
 
 logger = structlog.get_logger()
 
@@ -406,3 +407,168 @@ def fetch_etrade_chain(
         atm_iv=atm_iv,
         expirations=exp_dates,
     )
+
+
+# ── YTD Transactions ───────────────────────────────────────────
+
+
+def fetch_ytd_transactions(
+    session: ETradeSession,
+) -> list[dict[str, Any]]:
+    """Fetch all transactions YTD across all accounts.
+
+    Paginates through E*Trade's list_transactions (max 50 per page)
+    from Jan 1 of the current year through today.
+    Returns raw transaction dicts for parsing.
+    """
+    accounts = fetch_accounts(session)
+    jan1 = date(date.today().year, 1, 1)
+    all_txns: list[dict[str, Any]] = []
+
+    for account in accounts:
+        account_id = account["accountIdKey"]
+        marker: str | None = None
+
+        while True:
+            _sleep()
+            try:
+                resp = session.accounts.list_transactions(
+                    account_id,
+                    start_date=jan1,
+                    end_date=date.today(),
+                    sort_order="DESC",
+                    count=50,
+                    marker=marker,
+                    resp_format="json",
+                )
+            except Exception as e:
+                logger.warning("etrade_transactions_failed",
+                               account_id=account_id, error=str(e))
+                break
+
+            if not resp or "TransactionListResponse" not in resp:
+                break
+
+            txn_list = resp["TransactionListResponse"].get("Transaction", [])
+            if isinstance(txn_list, dict):
+                txn_list = [txn_list]
+
+            for txn in txn_list:
+                txn["_account_id"] = account_id
+            all_txns.extend(txn_list)
+
+            # Pagination: marker for next page
+            marker = resp["TransactionListResponse"].get("marker")
+            if not marker:
+                break
+
+    logger.info("ytd_transactions_fetched", count=len(all_txns))
+    return all_txns
+
+
+def populate_tax_engine_from_transactions(
+    transactions: list[dict[str, Any]],
+) -> TaxEngine:
+    """Parse E*Trade transactions and populate a TaxEngine with YTD totals.
+
+    E*Trade transaction types we care about:
+    - Sold/Bought options (premium income / close costs)
+    - Option expirations (worthless = full profit)
+    - Assignments (stock delivered or taken)
+
+    Transaction categories from the API:
+    - "Sold Short" / "Bought to Cover" → option open/close
+    - "Expired" → option expired worthless
+    - "Assigned" → option assignment
+    """
+    engine = TaxEngine()
+    # Track open option trades by description for matching
+    # Key: (account_id, symbol_desc) → list of (amount, date)
+    open_premiums: dict[tuple[str, str], list[tuple[Decimal, date]]] = {}
+
+    for txn in transactions:
+        txn_type = txn.get("transactionType", "")
+        amount = _decimal(txn.get("amount", 0))
+        desc = txn.get("description", "")
+        acct = txn.get("_account_id", "")
+
+        # Parse transaction date
+        txn_date_str = txn.get("transactionDate")
+        txn_date = _parse_txn_date(txn_date_str)
+
+        # Brokerage transactions contain the actual trade details
+        brokerage = txn.get("brokerage", {})
+        if not brokerage:
+            continue
+
+        product = brokerage.get("product", {})
+        sec_type = product.get("securityType", "")
+        quantity = abs(int(float(brokerage.get("quantity", 0) or 0)))
+        price = _decimal(brokerage.get("price", 0))
+
+        # Only process option transactions
+        if sec_type != "OPTN":
+            continue
+
+        action = brokerage.get("transactionType", "")
+        symbol_key = (acct, desc)
+
+        if action in ("Sold Short", "Sold"):
+            # Opening a short option = premium received
+            premium = price * quantity * 100
+            engine.option_premium_income_ytd += premium
+            open_premiums.setdefault(symbol_key, []).append(
+                (premium, txn_date or date.today())
+            )
+
+        elif action in ("Bought to Cover", "Bought"):
+            # Closing a short option = cost to close
+            close_cost = price * quantity * 100
+            # Match against open premium
+            opens = open_premiums.get(symbol_key, [])
+            if opens:
+                open_premium, open_date = opens.pop(0)
+                pnl = open_premium - close_cost
+            else:
+                # Can't match — treat close cost as the loss
+                pnl = -close_cost
+
+            if pnl >= 0:
+                engine.realized_stcg_ytd += pnl  # all options are STCG
+            else:
+                engine.realized_losses_ytd += abs(pnl)
+                # Record for wash sale tracking
+                symbol = product.get("symbol", "")
+                if symbol and txn_date:
+                    engine.wash_sale_tracker.record_loss(
+                        symbol, txn_date, abs(pnl)
+                    )
+
+        elif action == "Expired":
+            # Option expired worthless — full premium is profit
+            opens = open_premiums.get(symbol_key, [])
+            if opens:
+                open_premium, _ = opens.pop(0)
+                engine.realized_stcg_ytd += open_premium
+
+    logger.info(
+        "tax_engine_populated",
+        premium_income=str(engine.option_premium_income_ytd),
+        realized_stcg=str(engine.realized_stcg_ytd),
+        realized_losses=str(engine.realized_losses_ytd),
+    )
+    return engine
+
+
+def _parse_txn_date(date_val: Any) -> date | None:
+    """Parse E*Trade transaction date (epoch ms or string)."""
+    if date_val is None:
+        return None
+    try:
+        # E*Trade returns epoch milliseconds as an integer
+        if isinstance(date_val, (int, float)):
+            return datetime.fromtimestamp(date_val / 1000).date()
+        # Or ISO string
+        return datetime.fromisoformat(str(date_val)).date()
+    except (ValueError, TypeError, OSError):
+        return None

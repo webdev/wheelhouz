@@ -468,6 +468,7 @@ def format_local_briefing(
     intel_contexts: list[IntelligenceContext] | None = None,
     analyst_brief: str | None = None,
     position_reviews: list[PositionReview] | None = None,
+    tax_engine: Any | None = None,
 ) -> str:
     """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
     from datetime import date, timedelta
@@ -486,6 +487,12 @@ def format_local_briefing(
     lines.append(_C.bold(f"  WHEEL COPILOT — {today}"))
     lines.append(f"  {regime_fn(regime_name)} "
                  f"| VIX {vix:.1f} | SPY {spy_fn(f'{spy_change:+.2%}')}")
+    if tax_engine:
+        net_ytd = (tax_engine.realized_stcg_ytd + tax_engine.realized_ltcg_ytd
+                   - tax_engine.realized_losses_ytd)
+        net_fn = _C.green if net_ytd >= 0 else _C.red
+        lines.append(f"  YTD Options P&L: {net_fn(f'${net_ytd:+,.0f}')} "
+                     f"| Premium: {_C.green(f'${tax_engine.option_premium_income_ytd:,.0f}')}")
     lines.append(_C.dim(f"{'=' * 60}"))
 
     # ── DO NOW — urgent position actions + high conviction trades ──
@@ -675,6 +682,35 @@ def format_local_briefing(
     if analyst_brief:
         lines.append(f"\n{_C.cyan(_C.bold('━━ ANALYST BRIEF ━━'))}")
         lines.append(analyst_brief)
+
+    # ── YTD P&L — realized option performance from E*Trade ──
+    if tax_engine and (tax_engine.option_premium_income_ytd > 0
+                       or tax_engine.realized_stcg_ytd > 0
+                       or tax_engine.realized_losses_ytd > 0):
+        lines.append(f"\n{_C.blue(_C.bold('━━ YTD OPTIONS P&L ━━'))}")
+        lines.append(f"  Premium collected:  {_C.green(f'${tax_engine.option_premium_income_ytd:>10,.0f}')}")
+        lines.append(f"  Realized gains:     {_C.green(f'${tax_engine.realized_stcg_ytd:>10,.0f}')}  (STCG)")
+        if tax_engine.realized_ltcg_ytd > 0:
+            lines.append(f"  Realized gains:     {_C.green(f'${tax_engine.realized_ltcg_ytd:>10,.0f}')}  (LTCG)")
+        if tax_engine.realized_losses_ytd > 0:
+            lines.append(f"  Realized losses:    {_C.red(f'${tax_engine.realized_losses_ytd:>10,.0f}')}")
+        net = (tax_engine.realized_stcg_ytd + tax_engine.realized_ltcg_ytd
+               - tax_engine.realized_losses_ytd)
+        net_fn = _C.green if net >= 0 else _C.red
+        lines.append(f"  {'─' * 35}")
+        lines.append(f"  Net realized:       {net_fn(f'${net:>+10,.0f}')}")
+        # Estimated tax
+        est_tax = (
+            max(Decimal("0"), tax_engine.realized_stcg_ytd - tax_engine.harvested_losses_ytd)
+            * Decimal(str(tax_engine.stcg_effective))
+            + tax_engine.realized_ltcg_ytd * Decimal(str(tax_engine.ltcg_effective))
+        )
+        if est_tax > 0:
+            lines.append(f"  Est. tax liability:  {_C.yellow(f'${est_tax:>9,.0f}')}  "
+                         f"(Q next: ${est_tax / 4:,.0f})")
+        blocked = tax_engine.wash_sale_tracker.get_blocked_tickers()
+        if blocked:
+            lines.append(f"  Wash sale blocks:   {_C.red(', '.join(blocked))}")
 
     # ── SKIP — names the system looked at and explicitly rejected ──
     # Collect symbols already covered in DO NOW / CONSIDER / WATCH
@@ -867,10 +903,20 @@ async def run_analysis_cycle(
     # 7. Build sized recommendations from signals (TV adjusts conviction)
     recommendations = build_recommendations(all_signals, watchlist_data, intel_contexts=intel_contexts)
 
-    # 8. Risk checks
+    # 8. Risk checks + YTD P&L from E*Trade transactions
     router = AccountRouter()
     liquidity_ok, liquidity_msg = check_liquidity_health(router)
     tax_alerts = generate_tax_alerts([])
+
+    tax_engine = None
+    if etrade_session:
+        try:
+            from src.data.broker import fetch_ytd_transactions, populate_tax_engine_from_transactions
+            ytd_txns = fetch_ytd_transactions(etrade_session)
+            if ytd_txns:
+                tax_engine = populate_tax_engine_from_transactions(ytd_txns)
+        except Exception as e:
+            log.warning("ytd_pnl_fetch_failed", error=str(e))
 
     # 9. Build and print briefing
     briefing = format_local_briefing(
@@ -884,6 +930,7 @@ async def run_analysis_cycle(
         intel_contexts=intel_contexts,
         analyst_brief=analyst_brief,
         position_reviews=position_reviews,
+        tax_engine=tax_engine,
     )
     print(briefing)
 

@@ -43,6 +43,8 @@ from src.data.portfolio import load_portfolio_state
 from src.delivery.reasoning import generate_analyst_brief
 from src.models.intelligence import IntelligenceContext
 from src.models.shopping_list import BenchEntry, ShoppingListEntry
+from src.data.shopping_list import fetch_shopping_list
+from src.analysis.bench import build_bench
 
 log = structlog.get_logger()
 
@@ -1872,6 +1874,16 @@ async def run_analysis_cycle(
     except Exception as e:
         log.warning("portfolio_load_skipped", error=str(e))
 
+    # 5c. Load shopping list (cached daily)
+    shopping_list: list[ShoppingListEntry] = []
+    shopping_list_by_ticker: dict[str, ShoppingListEntry] = {}
+    try:
+        shopping_list = await fetch_shopping_list()
+        shopping_list_by_ticker = {e.ticker: e for e in shopping_list}
+        log.info("shopping_list_loaded", entries=len(shopping_list))
+    except Exception as e:
+        log.warning("shopping_list_load_failed", error=str(e))
+
     # 6. Claude analyst brief (opt-in, requires ANTHROPIC_API_KEY)
     analyst_brief = None
     contexts_with_signals = [c for c in intel_contexts if c.quant.signal_count > 0]
@@ -1885,6 +1897,7 @@ async def run_analysis_cycle(
         all_signals, watchlist_data,
         portfolio=portfolio_state,
         intel_contexts=intel_contexts,
+        shopping_list=shopping_list_by_ticker,
     )
 
     # 8. Risk checks + YTD P&L from E*Trade transactions
@@ -1908,9 +1921,23 @@ async def run_analysis_cycle(
         watchlist_set = set(symbols)
         scanner_picks = scan_wheel_candidates(
             watchlist_set, etrade_session=etrade_session,
+            shopping_list=shopping_list,
         )
     except Exception as e:
         log.warning("scanner_failed", error=str(e))
+
+    # 8c. Build bench — shopping list names approaching entry
+    bench: list[BenchEntry] = []
+    try:
+        watchlist_set_bench = set(symbols)
+        scanner_symbols = {p.symbol for p in scanner_picks}
+        bench = await build_bench(
+            shopping_list,
+            watchlist=watchlist_set_bench,
+            scanner_symbols=scanner_symbols,
+        )
+    except Exception as e:
+        log.warning("bench_build_failed", error=str(e))
 
     # 9. Build and print briefing
     briefing = format_local_briefing(
@@ -1927,6 +1954,7 @@ async def run_analysis_cycle(
         tax_engine=tax_engine,
         portfolio_state=portfolio_state,
         scanner_picks=scanner_picks,
+        bench=bench,
     )
     print(briefing)
 

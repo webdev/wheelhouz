@@ -512,16 +512,26 @@ def review_position(
     )
     if earnings_before_expiry and position.days_to_expiry <= 30:
         days_to_earnings = (earnings_date - date.today()).days
-        reason = f"Earnings in {days_to_earnings}d, position expires after — close or roll before report"
+        if roll:
+            reason = f"Earnings in {days_to_earnings}d, position expires after — close or roll before report"
+        else:
+            reason = f"Earnings in {days_to_earnings}d, position expires after — close before report"
         return _make_review(position, "CLOSE NOW", reason, pnl, pnl_pct, roll=roll)
 
     # 2. TAKE PROFIT — buy back short options to capture profit and redeploy
-    # Scale threshold by moneyness: deep OTM positions have near-zero
-    # assignment risk, so let them ride longer to capture more premium.
-    # Near ATM positions have real risk — take profit sooner.
+    # Scale threshold by moneyness AND time remaining.
+    # Deep OTM with short DTE: let it ride (theta accelerating).
+    # Deep OTM with long DTE: take profit sooner — remaining premium decays
+    # very slowly while collateral stays locked. Better to close and redeploy.
     pos_delta = abs(position.delta)
+    dte = position.days_to_expiry
     if pos_delta < 0.10:
-        take_profit_threshold = 0.80  # deep OTM — let it ride
+        if dte > 120:
+            take_profit_threshold = 0.50  # deep OTM + long-dated — close and redeploy
+        elif dte > 60:
+            take_profit_threshold = 0.65  # deep OTM + medium-dated
+        else:
+            take_profit_threshold = 0.80  # deep OTM + short-dated — let it ride
     elif pos_delta > 0.25:
         take_profit_threshold = 0.40  # near ATM — take profit early
     else:
@@ -538,8 +548,8 @@ def review_position(
                       f"buy to close for ${close_cost:,.0f} and sell next month's cycle")
         return _make_review(position, "TAKE PROFIT", reason, pnl, pnl_pct, roll=roll)
 
-    # 2b. Time-based close: under 14 DTE, gamma risk rises, diminishing returns
-    if is_short and position.days_to_expiry <= 14 and pnl_pct >= 0.30:
+    # 2b. Time-based close: under 21 DTE, gamma risk rises, diminishing returns
+    if is_short and position.days_to_expiry <= 21 and pnl_pct >= 0.30:
         profit_dollars = pnl * 100 * position.quantity
         close_cost = position.current_price * 100 * position.quantity
         reason = (f"Only {position.days_to_expiry}d left with {pnl_pct:.0%} captured "
@@ -619,9 +629,14 @@ def review_position(
                     f"(delta {pos_delta:.2f}) — unlikely to be threatened by report. "
                     f"Hold unless earnings surprise dramatically")
             else:
-                watch_reasons.append(
-                    f"Earnings in {days_to_earnings}d and position is underwater ({pnl_pct:.0%}). "
-                    f"Close before report to limit loss, or roll to post-earnings expiration")
+                if roll:
+                    watch_reasons.append(
+                        f"Earnings in {days_to_earnings}d and position is underwater ({pnl_pct:.0%}). "
+                        f"Close before report to limit loss, or roll to post-earnings expiration")
+                else:
+                    watch_reasons.append(
+                        f"Earnings in {days_to_earnings}d and position is underwater ({pnl_pct:.0%}). "
+                        f"Close before report to limit loss")
         else:
             # Calculate the 5% trigger level
             trigger_pct = 0.05

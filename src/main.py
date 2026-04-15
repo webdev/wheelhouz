@@ -859,9 +859,8 @@ def format_local_briefing(
     if recommendations:
         low_trades = [r for r in recommendations if r.conviction == "low"]
 
+    consider_lines: list[str] = []
     if medium_trades or low_trades:
-        lines.append(f"\n💡 {_C.blue(_C.bold('CONSIDER'))}")
-
         for r in medium_trades + low_trades:
             # Same concentration / position-cap guards as DO NOW
             if _symbol_option_count.get(r.symbol, 0) >= 3:
@@ -880,22 +879,26 @@ def format_local_briefing(
 
             is_call = r.trade_type == "sell_call"
             opt_type = "Call" if is_call else "Put"
-            lines.append(f"   >> {_C.bold(r.symbol)} — Sell ${r.strike} {opt_type} exp {exp_str}")
-            lines.append(
+            consider_lines.append(f"   >> {_C.bold(r.symbol)} — Sell ${r.strike} {opt_type} exp {exp_str}")
+            consider_lines.append(
                 f"      {r.contracts}x @ ${r.premium} mid | "
                 f"{r.annualized_yield:.0%} ann.{delta_str}{tv_str}"
             )
             if is_call:
-                lines.append(
+                consider_lines.append(
                     f"      Max profit ${r.premium * r.contracts * 100:,.0f}"
                 )
             else:
-                lines.append(
+                consider_lines.append(
                     f"      Collateral ${r.capital_deployed:,.0f} "
                     f"({r.portfolio_pct:.1%} NLV) | "
                     f"Max profit ${r.premium * r.contracts * 100:,.0f}"
                 )
-            lines.append(f"      {r.reasoning}")
+            consider_lines.append(f"      {r.reasoning}")
+
+    if consider_lines:
+        lines.append(f"\n💡 {_C.blue(_C.bold('CONSIDER'))}")
+        lines.extend(consider_lines)
 
     # ── OPPORTUNITIES — proactive deployment recommendations ──
     # Symbols being closed/rolled in DO NOW — don't recommend re-opening
@@ -1214,12 +1217,8 @@ def format_local_briefing(
                                  f"~{collateral / float(nlv):.1%} NLV)")
 
     # ── SCANNER PICKS — high-IV wheel candidates from broader universe ──
+    scanner_lines: list[str] = []
     if scanner_picks:
-        if not opportunities:
-            # No watchlist opportunities — scanner gets its own header
-            lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
-                         f"— ${cash:,.0f} cash available")
-        lines.append(f"\n  🔍 {_C.bold('SCANNER PICKS')} — high-IV names outside your watchlist")
         max_alloc_scanner = float(nlv) * 0.02 if nlv > 0 else 20_000
         shown = 0
         for pick in scanner_picks:
@@ -1228,7 +1227,7 @@ def format_local_briefing(
             # Price floor — scanner cache may contain stale symbols that dropped
             if pick.price < 5:
                 continue
-            # Skip if even 1 contract exceeds 5% NLV
+            # Skip if even 1 contract exceeds 2% NLV
             if pick.collateral_per_contract > max_alloc_scanner:
                 continue
             # Skip if already concentrated in this name
@@ -1236,6 +1235,10 @@ def format_local_briefing(
                 continue
             # Don't recommend what we're closing in DO NOW
             if pick.symbol in _closing_symbols:
+                continue
+            # Minimum premium per contract — $1.00 ($100/contract) floor.
+            # Tiny premiums like $0.30 aren't worth the collateral or attention.
+            if pick.put_contract and float(pick.put_contract.bid) < 1.00:
                 continue
             # Bid-ask spread check — skip illiquid options
             if pick.put_contract:
@@ -1262,14 +1265,14 @@ def format_local_briefing(
             tier_str = f" [{tier}]" if tier else ""
 
             shown += 1
-            lines.append(f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(pick.symbol)}{tier_str} @ ${pick.price:,.2f}")
-            lines.append(f"    {' | '.join(pick.reasons)}")
+            scanner_lines.append(f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(pick.symbol)}{tier_str} @ ${pick.price:,.2f}")
+            scanner_lines.append(f"    {' | '.join(pick.reasons)}")
             if pick.put_contract:
                 pc = pick.put_contract
                 dte = (pc.expiration - date.today()).days
                 delta_str = f" | {_C.bold('Delta')}: {abs(pc.delta):.2f}" if abs(pc.delta) > 0.01 else ""
                 otm_pct = (1 - float(pc.strike) / pick.price) * 100 if pick.price > 0 else 0
-                lines.append(
+                scanner_lines.append(
                     f"    {_C.bold('Strike')}: ${pc.strike} ({otm_pct:.0f}% OTM) "
                     f"| {_C.bold('Exp')}: {_fmt_exp(pc.expiration)} ({dte}d) "
                     f"| {_C.bold('Bid')}: ${float(pc.bid):.2f}"
@@ -1278,7 +1281,7 @@ def format_local_briefing(
                 mid = float(pc.mid)
                 strike_f = float(pc.strike)
                 yield_pct = (mid / strike_f) * 100 if strike_f > 0 else 0
-                lines.append(
+                scanner_lines.append(
                     f"    Premium: ${mid:.2f}/contract "
                     f"| Yield: {yield_pct:.1f}% ({pick.ann_yield:.0f}% ann)"
                 )
@@ -1294,7 +1297,7 @@ def format_local_briefing(
                         contracts -= 1
                         collateral = Decimal(contracts) * pick.put_contract.strike * 100
                     total_premium = Decimal(contracts) * pick.put_contract.mid * 100
-                    lines.append(
+                    scanner_lines.append(
                         f"    Size: {contracts}x ${pick.put_contract.strike} puts "
                         f"(${collateral:,.0f} collateral, ${total_premium:,.0f} premium, "
                         f"~{float(collateral) / float(nlv):.1%} NLV)"
@@ -1303,8 +1306,15 @@ def format_local_briefing(
                     contracts = max(1, int(target_alloc / (pick.price * 100))) if pick.price > 0 else 1
                     contracts = min(contracts, 10)
                     coll = contracts * pick.price * 100
-                    lines.append(f"    Size: ~{contracts}x puts (${coll:,.0f} collateral, "
-                                 f"~{coll / float(nlv):.1%} NLV)")
+                    scanner_lines.append(f"    Size: ~{contracts}x puts (${coll:,.0f} collateral, "
+                                         f"~{coll / float(nlv):.1%} NLV)")
+
+    if scanner_lines:
+        if not opportunities:
+            lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
+                         f"— ${cash:,.0f} cash available")
+        lines.append(f"\n  🔍 {_C.bold('SCANNER PICKS')} — high-IV names outside your watchlist")
+        lines.extend(scanner_lines)
 
     # ── REALLOCATE — underperforming positions to redeploy ──
     if realloc_candidates:

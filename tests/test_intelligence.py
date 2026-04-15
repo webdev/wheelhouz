@@ -593,13 +593,13 @@ class TestPositionReview:
         result = review_position(pos, ctx)
         assert result.action == "TAKE PROFIT"
 
-    def test_deep_otm_no_take_profit_at_56pct(self) -> None:
-        """Deep OTM (delta < 0.10) should NOT take profit at 56% — let it ride."""
+    def test_deep_otm_long_dated_takes_profit_at_56pct(self) -> None:
+        """Deep OTM with 185 DTE at 56% captured — take profit, collateral locked too long."""
         from src.intelligence.position_review import review_position
         from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
         from src.models.position import Position
 
-        # Mirrors the GOOG $270 put scenario: 18% OTM, 56% captured
+        # Mirrors the GOOG $270 put scenario: 18% OTM, 56% captured, 185 DTE
         pos = Position(
             symbol="GOOG", position_type="short_put", quantity=1,
             strike=Decimal("270"), expiration=date(2026, 10, 16),
@@ -614,8 +614,8 @@ class TestPositionReview:
         )
 
         result = review_position(pos, ctx)
-        assert result.action == "HOLD", (
-            f"Deep OTM put at 56% captured should HOLD, not {result.action}"
+        assert result.action == "TAKE PROFIT", (
+            f"Deep OTM + 185 DTE at 56% should TAKE PROFIT, not {result.action}"
         )
 
     def test_deep_otm_takes_profit_at_80pct(self) -> None:
@@ -1350,8 +1350,8 @@ class TestHighIVTakeProfit:
         assert result.action == "TAKE PROFIT"
         assert "high iv" in result.reasoning.lower()
 
-    def test_deep_otm_long_dated_normal_iv_holds(self) -> None:
-        """Deep OTM with 185 DTE and normal IV should NOT take profit at 56%."""
+    def test_deep_otm_long_dated_takes_profit_at_56pct(self) -> None:
+        """Deep OTM with 185 DTE at 56% captured — take profit, collateral locked too long."""
         from src.intelligence.position_review import review_position
         from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
         from src.models.position import Position
@@ -1370,21 +1370,20 @@ class TestHighIVTakeProfit:
         )
 
         result = review_position(pos, ctx)
-        # 56% captured but 185 DTE and moderate IV → should NOT take profit
-        assert result.action != "TAKE PROFIT"
+        # 56% captured + 185 DTE → remaining premium decays slowly, close and redeploy
+        assert result.action == "TAKE PROFIT"
 
 
 class TestLargeDollarProfit:
     """Positions with large absolute profit get a 'consider closing' note."""
 
-    def test_large_profit_adds_watch_reason(self) -> None:
+    def test_large_profit_long_dated_takes_profit(self) -> None:
         from src.intelligence.position_review import review_position
         from src.models.position import Position
         from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
 
         # MU Aug $300 put: entry $40.80, current $15.08 → $2,572 profit (63%)
-        # Deep OTM needs 80% for TAKE PROFIT, so this stays in WATCH
-        # But $2,572 is a lot of money — should mention it
+        # 129 DTE + deep OTM → threshold lowered to 50%, 63% triggers TAKE PROFIT
         pos = Position(
             symbol="MU", position_type="short_put", quantity=1,
             strike=Decimal("300"), expiration=date(2026, 8, 21),
@@ -1398,7 +1397,7 @@ class TestLargeDollarProfit:
             quant=make_quant_intelligence(iv_rank=50.0, trend_direction="range"),
         )
         result = review_position(pos, ctx)
-        assert result.action == "WATCH CLOSELY"
+        assert result.action == "TAKE PROFIT"
         assert "$2,572" in result.reasoning or "2,572" in result.reasoning
 
     def test_small_profit_no_mention(self) -> None:
@@ -1459,11 +1458,12 @@ class TestHighVolEarningsMovers:
         from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
         from tests.fixtures.market_data import make_event_calendar
 
-        # GOOG is NOT in the high-vol list, should say "safe to hold"
+        # GOOG is NOT in the high-vol list, 45% captured (below 50% threshold)
+        # Should say "safe to hold" in watch, not escalate to TAKE PROFIT
         pos = Position(
             symbol="GOOG", position_type="short_put", quantity=1,
             strike=Decimal("270"), expiration=date(2026, 10, 16),
-            entry_price=Decimal("20.00"), current_price=Decimal("8.80"),
+            entry_price=Decimal("20.00"), current_price=Decimal("11.00"),
             underlying_price=Decimal("400"), cost_basis=Decimal("2000"),
             delta=-0.04, theta=0.02, gamma=0.001, vega=0.03, iv=0.35,
             days_to_expiry=185,

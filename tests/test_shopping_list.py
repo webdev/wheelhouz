@@ -447,3 +447,50 @@ class TestBriefingIntegration:
             recommendations=recs,
         )
         assert "Parkev" in briefing
+
+
+class TestIntegration:
+    def test_full_pipeline_mock(self, tmp_path, monkeypatch) -> None:
+        """Shopping list → scanner → conviction → bench → briefing."""
+        from src.data import shopping_list as sl_mod
+
+        # Mock resolve_ticker so no yfinance calls
+        _mock_tickers = {"Alphabet": "GOOG", "Meta Platforms": "META", "Bad Corp": "BAD"}
+        monkeypatch.setattr(sl_mod, "resolve_ticker", lambda name: _mock_tickers.get(name.strip()))
+
+        # Set up cache with known data
+        csv_content = (
+            "Name,Rating,Date Updated,2026 Price Target,As of Date,2027 Price Target\n"
+            "Alphabet,Top 15 Stock,4/1/2026,200-220,,250-280\n"
+            "Meta Platforms,Buy,4/1/2026,700-800,,900-1000\n"
+            "Bad Corp,Sell,4/1/2026,,,\n"
+        )
+        cache = tmp_path / ".shopping_list_cache.csv"
+        cache.write_text(csv_content)
+        ts = tmp_path / ".shopping_list_fetched"
+        from datetime import timezone as _tz
+        ts.write_text(datetime.now(_tz.utc).isoformat())
+
+        monkeypatch.setattr(sl_mod, "_CACHE_FILE", cache)
+        monkeypatch.setattr(sl_mod, "_TIMESTAMP_FILE", ts)
+        monkeypatch.setattr(
+            sl_mod, "load_trading_params",
+            lambda: {"shopping_list": {"url": "http://fake", "cache_ttl_hours": 24}},
+        )
+
+        entries = asyncio.run(sl_mod.fetch_shopping_list())
+        # All 3 resolve (mocked): GOOG, META, BAD
+        assert len(entries) == 3
+
+        # Verify Alphabet resolved to GOOG
+        goog = next((e for e in entries if e.ticker == "GOOG"), None)
+        assert goog is not None
+        assert goog.rating_tier == 4
+
+        # Verify conviction modifier works
+        from src.main import _apply_shopping_list_adjustment
+        sl_dict = {e.ticker: e for e in entries}
+        sized = make_sized_opportunity(conviction="low", symbol="GOOG")
+        result, label = _apply_shopping_list_adjustment(sized, sl_dict)
+        assert result.conviction == "medium"  # +1 for Top 15
+        assert "Top 15" in label

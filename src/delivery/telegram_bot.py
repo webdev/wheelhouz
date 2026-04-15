@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
 from src.models.execution import LivePriceGate
 from src.models.market import MarketContext
@@ -135,8 +136,14 @@ def split_message(text: str, max_len: int = TELEGRAM_MAX_LEN) -> list[str]:
 # ── Telegram send ───────────────────────────────────────────────
 
 
-async def send_telegram(text: str, parse_mode: str = "Markdown") -> None:
-    """Send a single message via Telegram Bot API."""
+async def send_telegram(
+    text: str, parse_mode: str | None = None,
+) -> None:
+    """Send a single message via Telegram Bot API.
+
+    parse_mode=None sends plain text (safest for briefings with $, _, * chars).
+    Use "MarkdownV2" or "HTML" only for pre-escaped content.
+    """
     import telegram  # type: ignore[import-not-found]
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -145,11 +152,14 @@ async def send_telegram(text: str, parse_mode: str = "Markdown") -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set")
 
     bot = telegram.Bot(token=token)
-    await bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode)
+    kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
+    if parse_mode:
+        kwargs["parse_mode"] = parse_mode
+    await bot.send_message(**kwargs)
 
 
 async def send_briefing(briefing: str) -> None:
-    """Send a full briefing, splitting across messages if needed."""
+    """Send a full briefing as plain text, splitting across messages if needed."""
     for chunk in split_message(briefing):
         await send_telegram(chunk)
 

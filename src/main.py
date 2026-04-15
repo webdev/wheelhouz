@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 from datetime import datetime, time, timezone
 from decimal import Decimal
 from typing import Any
@@ -1230,6 +1231,18 @@ async def run_analysis_cycle(
         portfolio_state=portfolio_state,
     )
     print(briefing)
+
+    # Push to Telegram if configured
+    tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    tg_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if tg_token and tg_chat and always_push:
+        try:
+            plain = _strip_ansi(briefing)
+            from src.delivery.telegram_bot import send_briefing
+            await send_briefing(plain)
+            log.info("telegram_briefing_sent", cycle=cycle_name)
+        except Exception as e:
+            log.warning("telegram_send_failed", error=str(e))
 
     result = {
         "cycle": cycle_name,

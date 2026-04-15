@@ -1618,6 +1618,130 @@ class TestOpportunitiesSection:
         assert "Deployed:" in clean
 
 
+class TestWheelFocusedRecommendations:
+    """Recommendations should be wheel-focused: sell puts or buy 100 shares."""
+
+    def test_sell_put_default_for_expensive_stocks(self) -> None:
+        """Stocks too expensive for 100 shares should recommend SELL PUT, not BUY SHARES."""
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+        from src.models.position import PortfolioState
+        from src.models.market import OptionContract
+        from tests.fixtures.market_data import (
+            make_market_context, make_price_history, make_options_chain, make_event_calendar,
+        )
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.intelligence import TechnicalConsensus
+
+        regime = RegimeState(
+            regime="hold", vix=20.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70,
+            timestamp=datetime.utcnow(),
+        )
+        # Expensive stock: 100 shares = $50K > 5% of $1M NLV
+        mkt = make_market_context(symbol="NVDA", iv_rank=35.0, price=Decimal("500"),
+                                  price_change_1d=-0.01)
+        hist = make_price_history(symbol="NVDA", current_price=Decimal("500"),
+                                  sma_200=Decimal("490"), sma_50=Decimal("510"), rsi_14=42.0)
+        exp_date = date.today() + timedelta(days=37)
+        chain = make_options_chain(symbol="NVDA", puts=[
+            OptionContract(strike=Decimal("480"), expiration=exp_date, option_type="put",
+                           bid=Decimal("5.00"), ask=Decimal("5.40"), mid=Decimal("5.20"),
+                           volume=1000, open_interest=5000, implied_vol=0.32, delta=-0.22),
+        ])
+        cal = make_event_calendar(symbol="NVDA", next_earnings=date.today() + timedelta(days=60))
+        intel_ctx = make_intelligence_context(
+            symbol="NVDA", quant=make_quant_intelligence(iv_rank=35.0),
+            technical_consensus=TechnicalConsensus(
+                source="tradingview", overall="BUY", oscillators="BUY",
+                moving_averages="BUY", buy_count=16, neutral_count=4, sell_count=6,
+            ),
+        )
+        portfolio = PortfolioState(
+            cash_available=Decimal("150000"), net_liquidation=Decimal("1000000"),
+        )
+        briefing = format_local_briefing(
+            regime=regime, vix=20.0, spy_change=0.005,
+            all_signals=[], watchlist_data=[("NVDA", mkt, hist, chain, cal)],
+            tax_alerts=[], intel_contexts=[intel_ctx], portfolio_state=portfolio,
+        )
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
+        # Should be SELL PUT, NOT BUY SHARES
+        assert "SELL PUT" in clean
+        assert "BUY 100 SHARES" not in clean
+        assert "BUY SHARES" not in clean
+
+    def test_reallocation_shows_underperformers(self) -> None:
+        """Positions down significantly should appear in REALLOCATE section."""
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+        from src.models.position import PortfolioState, Position
+
+        regime = RegimeState(
+            regime="hold", vix=20.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70,
+            timestamp=datetime.utcnow(),
+        )
+        loser = Position(
+            symbol="INTC", position_type="long_stock", quantity=200,
+            strike=Decimal("0"), expiration=None,
+            entry_price=Decimal("40"), current_price=Decimal("0"),
+            underlying_price=Decimal("30"), cost_basis=Decimal("40"),
+            delta=1.0, theta=0.0, gamma=0.0, vega=0.0, iv=0.0,
+        )
+        portfolio = PortfolioState(
+            positions=[loser],
+            cash_available=Decimal("50000"),
+            net_liquidation=Decimal("1000000"),
+        )
+        briefing = format_local_briefing(
+            regime=regime, vix=20.0, spy_change=0.005,
+            all_signals=[], watchlist_data=[], tax_alerts=[],
+            portfolio_state=portfolio,
+        )
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
+        assert "REALLOCATE" in clean
+        assert "INTC" in clean
+        assert "down" in clean.lower()
+        assert "redeploy" in clean.lower()
+
+    def test_small_position_flagged_for_reallocation(self) -> None:
+        """< 100 shares that can't sell covered calls should be flagged."""
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+        from src.models.position import PortfolioState, Position
+
+        regime = RegimeState(
+            regime="hold", vix=20.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70,
+            timestamp=datetime.utcnow(),
+        )
+        small_pos = Position(
+            symbol="COIN", position_type="long_stock", quantity=25,
+            strike=Decimal("0"), expiration=None,
+            entry_price=Decimal("200"), current_price=Decimal("0"),
+            underlying_price=Decimal("180"), cost_basis=Decimal("200"),
+            delta=1.0, theta=0.0, gamma=0.0, vega=0.0, iv=0.0,
+        )
+        portfolio = PortfolioState(
+            positions=[small_pos],
+            cash_available=Decimal("50000"),
+            net_liquidation=Decimal("1000000"),
+        )
+        briefing = format_local_briefing(
+            regime=regime, vix=20.0, spy_change=0.005,
+            all_signals=[], watchlist_data=[], tax_alerts=[],
+            portfolio_state=portfolio,
+        )
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
+        assert "REALLOCATE" in clean
+        assert "COIN" in clean
+        assert "covered calls" in clean.lower()
+
+
 class TestYTDOrderParsing:
     """Tests for E*Trade order parsing → TaxEngine population."""
 

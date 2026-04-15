@@ -716,25 +716,32 @@ def format_local_briefing(
         if score < 3:
             continue  # not enough conviction
 
-        # Determine recommendation type
-        # Long-term buy: strong technicals + near support (Engine 1)
-        # Put sell: decent IV + pullback (Engine 2)
+        # Determine recommendation type — wheel-focused
+        # SELL PUT is the default wheel entry: collect premium, get assigned at discount
+        # BUY 100 SHARES only if affordable (need 100 for covered calls) AND IV is low
         rec_type = ""
         reason = ""
+        cost_100 = price * 100
+        can_afford_100 = cost_100 > 0 and float(cash) >= cost_100 and cost_100 <= float(nlv) * 0.05
+
         if iv >= 40 and (rsi is not None and rsi <= 45):
             rec_type = "SELL PUT"
             reason = f"Sell put on pullback — {'rich' if iv >= 50 else 'decent'} premium"
             if iv_detail:
                 details.append(iv_detail)
-        elif score >= 4 and tv in ("BUY", "STRONG_BUY"):
-            rec_type = "BUY SHARES"
-            reason = "Attractive entry — technicals + crowd consensus align"
         elif iv >= 50:
             rec_type = "SELL PUT"
-            reason = f"Premium rich (IV rank {iv:.0f}) — good for cash-secured puts"
-        elif score >= 3:
-            rec_type = "BUY SHARES"
-            reason = "Near support with positive technicals"
+            reason = f"Premium rich (IV rank {iv:.0f}) — sell puts to enter at a discount"
+        elif can_afford_100 and score >= 4 and tv in ("BUY", "STRONG_BUY") and iv < 30:
+            # Low IV = cheap puts, better to buy shares and start selling calls
+            rec_type = "BUY 100 SHARES"
+            reason = "Start wheel — IV too low for puts, buy shares and sell covered calls"
+        else:
+            # Default wheel entry: sell puts to collect premium or get assigned
+            rec_type = "SELL PUT"
+            reason = "Sell puts to enter at a discount — wheel entry"
+            if iv_detail:
+                details.append(iv_detail)
 
         # For SELL PUT, find the best put contract from the chain
         best_put = None
@@ -760,6 +767,37 @@ def format_local_briefing(
     # Sort by detail count (proxy for conviction) descending
     opportunities.sort(key=lambda x: len(x[3]), reverse=True)
 
+    # ── Reallocation candidates: underperforming stock that could be redeployed ──
+    realloc_candidates: list[tuple[str, int, Decimal, Decimal, float, str]] = []
+    # (symbol, shares, cost_basis, current_price, pnl_pct, reason)
+    if portfolio_state and portfolio_state.positions:
+        for pos in portfolio_state.positions:
+            if pos.position_type != "long_stock" or pos.quantity < 1:
+                continue
+            if pos.cost_basis <= 0 or pos.underlying_price <= 0:
+                continue
+            pnl_pct = float((pos.underlying_price - pos.cost_basis) / pos.cost_basis)
+            sym_tv = tv_by_sym.get(pos.symbol, "")
+
+            # Find underperformers: down significantly OR bearish consensus
+            reason_parts: list[str] = []
+            if pnl_pct < -0.15:
+                reason_parts.append(f"down {pnl_pct:.0%} from cost basis")
+            elif pnl_pct < -0.05 and sym_tv in ("SELL", "STRONG_SELL"):
+                reason_parts.append(f"down {pnl_pct:.0%}, TV {sym_tv}")
+            # Small position that can't run the wheel (< 100 shares, not near 100)
+            if pos.quantity < 100 and pos.quantity < 90:
+                reason_parts.append(f"only {pos.quantity} shares — can't sell covered calls")
+
+            if reason_parts:
+                realloc_candidates.append((
+                    pos.symbol, pos.quantity, pos.cost_basis,
+                    pos.underlying_price, pnl_pct, " | ".join(reason_parts),
+                ))
+
+    # Sort by worst performer first
+    realloc_candidates.sort(key=lambda x: x[4])
+
     if opportunities and cash > 0:
         lines.append(f"\n{_C.green(_C.bold('━━ OPPORTUNITIES ━━'))} "
                      f"{_C.dim(f'— ${cash:,.0f} cash available')}")
@@ -770,7 +808,7 @@ def format_local_briefing(
             )
             price = float(mkt.price) if mkt else 0
 
-            type_fn = _C.green if rec_type == "BUY SHARES" else _C.cyan
+            type_fn = _C.green if rec_type == "BUY 100 SHARES" else _C.cyan
             lines.append(f"  {type_fn(rec_type)}: {_C.bold(symbol)} @ ${price:,.2f}")
             lines.append(f"    {reason}")
             if details:
@@ -795,17 +833,16 @@ def format_local_briefing(
                     f"| Yield: {yield_on_cap:.1f}% ({ann_yield:.0f}% ann)"
                 )
 
-            # Sizing hint based on available cash
+            # Sizing: 1.5% NLV target per position
             if nlv > 0:
-                suggested = float(nlv) * 0.015
-                if rec_type == "BUY SHARES":
-                    shares = int(suggested / price) if price > 0 else 0
-                    if shares > 0:
-                        lines.append(f"    Size: ~{shares} shares (${shares * price:,.0f}, "
-                                     f"~{shares * price / float(nlv):.1%} NLV)")
+                target_alloc = float(nlv) * 0.015
+                if rec_type == "BUY 100 SHARES":
+                    cost = price * 100
+                    lines.append(f"    Size: 100 shares (${cost:,.0f}, "
+                                 f"~{cost / float(nlv):.1%} NLV) — then sell covered calls")
                 elif put_contract:
                     strike_f = float(put_contract.strike)
-                    contracts = max(1, int(suggested / (strike_f * 100))) if strike_f > 0 else 1
+                    contracts = max(1, int(target_alloc / (strike_f * 100))) if strike_f > 0 else 1
                     collateral = Decimal(contracts) * put_contract.strike * 100
                     total_premium = Decimal(contracts) * put_contract.mid * 100
                     lines.append(
@@ -815,10 +852,25 @@ def format_local_briefing(
                     )
                 else:
                     # SELL PUT without chain data — fallback to price-based estimate
-                    contracts = max(1, int(suggested / (price * 100))) if price > 0 else 1
+                    contracts = max(1, int(target_alloc / (price * 100))) if price > 0 else 1
                     collateral = contracts * price * 100
                     lines.append(f"    Size: ~{contracts}x puts (${collateral:,.0f} collateral, "
                                  f"~{collateral / float(nlv):.1%} NLV)")
+
+    # ── REALLOCATE — underperforming positions to redeploy ──
+    if realloc_candidates:
+        lines.append(f"\n{_C.yellow(_C.bold('━━ REALLOCATE ━━'))} "
+                     f"{_C.dim('— sell underperformers, redeploy into wheel')}")
+        for sym, qty, basis, cur_price, pnl_pct, reason in realloc_candidates[:5]:
+            value = qty * cur_price
+            pnl_dollar = qty * (cur_price - basis)
+            pnl_color = _C.red if pnl_pct < 0 else _C.green
+            lines.append(
+                f"  {_C.yellow('SELL')}: {_C.bold(sym)} — {qty} shares @ ${cur_price:,.2f} "
+                f"({pnl_color(f'{pnl_pct:+.0%}')}, {pnl_color(f'${pnl_dollar:+,.0f}')})"
+            )
+            lines.append(f"    {reason}")
+            lines.append(f"    Frees ${value:,.0f} — redeploy via puts on stronger names")
 
     # ── WATCH — position holds + earnings + tax ──
     watch_positions = []

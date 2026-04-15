@@ -3,6 +3,7 @@
 Public interface for the analysis layer.
 """
 
+from src.analysis.bench import build_bench
 from src.analysis.opportunities import find_and_rank_opportunities
 from src.analysis.scanner import scan_position
 from src.analysis.signals import detect_all_signals
@@ -15,4 +16,5 @@ __all__ = [
     "size_position",
     "scan_position",
     "find_and_rank_opportunities",
+    "build_bench",
 ]

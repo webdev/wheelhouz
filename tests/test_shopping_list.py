@@ -180,3 +180,77 @@ class TestFetchShoppingList:
 
         entries = asyncio.run(sl_mod.fetch_shopping_list())
         assert entries == []
+
+
+class TestBenchBuilder:
+    def test_bench_excludes_watchlist(self) -> None:
+        from src.analysis.bench import _rank_and_filter
+
+        entries = [
+            ShoppingListEntry(
+                name="In Watchlist", ticker="WATCH", rating="Buy", rating_tier=3,
+                date_updated=date(2026, 4, 1),
+                price_target_2026=(Decimal("100"), Decimal("120")),
+                price_target_2027=None, stale=False,
+            ),
+            ShoppingListEntry(
+                name="Not In Watchlist", ticker="FREE", rating="Buy", rating_tier=3,
+                date_updated=date(2026, 4, 1),
+                price_target_2026=(Decimal("50"), Decimal("60")),
+                price_target_2027=None, stale=False,
+            ),
+        ]
+        result = _rank_and_filter(entries, watchlist={"WATCH"}, scanner_symbols=set())
+        tickers = [e.ticker for e in result]
+        assert "WATCH" not in tickers
+        assert "FREE" in tickers
+
+    def test_bench_excludes_sell_rated(self) -> None:
+        from src.analysis.bench import _rank_and_filter
+
+        entries = [
+            ShoppingListEntry(
+                name="Sell Corp", ticker="SELL", rating="Sell", rating_tier=0,
+                date_updated=date(2026, 4, 1),
+                price_target_2026=None, price_target_2027=None, stale=False,
+            ),
+        ]
+        result = _rank_and_filter(entries, watchlist=set(), scanner_symbols=set())
+        assert len(result) == 0
+
+    def test_near_actionable_iv_rich(self) -> None:
+        from src.analysis.bench import _check_near_actionable
+
+        actionable, reason = _check_near_actionable(
+            iv_rank=72.0, rsi=45.0, next_earnings=None,
+        )
+        assert actionable is True
+        assert "IV rank" in reason or "premium rich" in reason.lower()
+
+    def test_near_actionable_oversold(self) -> None:
+        from src.analysis.bench import _check_near_actionable
+
+        actionable, reason = _check_near_actionable(
+            iv_rank=30.0, rsi=28.0, next_earnings=None,
+        )
+        assert actionable is True
+        assert "RSI" in reason or "oversold" in reason.lower()
+
+    def test_near_actionable_earnings_blackout(self) -> None:
+        from src.analysis.bench import _check_near_actionable
+
+        actionable, reason = _check_near_actionable(
+            iv_rank=30.0, rsi=50.0, next_earnings=date(2026, 4, 20),
+            today=date(2026, 4, 15),
+        )
+        assert actionable is True
+        assert "BLACKOUT" in reason
+
+    def test_not_near_actionable(self) -> None:
+        from src.analysis.bench import _check_near_actionable
+
+        actionable, reason = _check_near_actionable(
+            iv_rank=30.0, rsi=50.0, next_earnings=None,
+        )
+        assert actionable is False
+        assert reason is None

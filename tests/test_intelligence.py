@@ -1478,6 +1478,122 @@ class TestHighVolEarningsMovers:
         assert "safe to hold" in result.reasoning
 
 
+class TestOpportunitiesSection:
+    """OPPORTUNITIES section shows proactive deployment recommendations."""
+
+    def test_opportunities_appear_when_conditions_met(self) -> None:
+        """Stock near support with decent IV and positive TV → shows opportunity."""
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+        from src.models.position import PortfolioState
+        from tests.fixtures.market_data import (
+            make_market_context, make_price_history, make_options_chain, make_event_calendar,
+        )
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+
+        regime = RegimeState(
+            regime="hold", vix=20.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70,
+            timestamp=datetime.utcnow(),
+        )
+        mkt = make_market_context(
+            symbol="AAPL", iv_rank=55.0, price=Decimal("195"),
+            price_change_1d=-0.02,
+        )
+        hist = make_price_history(
+            symbol="AAPL", current_price=Decimal("195"),
+            sma_200=Decimal("192"), sma_50=Decimal("198"),
+            rsi_14=38.0,
+        )
+        chain = make_options_chain(symbol="AAPL")
+        cal = make_event_calendar(
+            symbol="AAPL",
+            next_earnings=date.today() + timedelta(days=60),  # far out
+        )
+        watchlist_data = [(
+            "AAPL", mkt, hist, chain, cal,
+        )]
+        intel_ctx = make_intelligence_context(
+            symbol="AAPL",
+            quant=make_quant_intelligence(iv_rank=55.0),
+        )
+        # Manually set TV consensus
+        from src.models.intelligence import TechnicalConsensus
+        intel_ctx = make_intelligence_context(
+            symbol="AAPL",
+            quant=make_quant_intelligence(iv_rank=55.0),
+            technical_consensus=TechnicalConsensus(
+                source="tradingview", overall="BUY", oscillators="BUY",
+                moving_averages="BUY", buy_count=15, neutral_count=5, sell_count=6,
+            ),
+        )
+        portfolio = PortfolioState(
+            cash_available=Decimal("150000"),
+            net_liquidation=Decimal("1000000"),
+        )
+        briefing = format_local_briefing(
+            regime=regime, vix=20.0, spy_change=0.005,
+            all_signals=[], watchlist_data=watchlist_data, tax_alerts=[],
+            intel_contexts=[intel_ctx],
+            portfolio_state=portfolio,
+        )
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
+        assert "OPPORTUNITIES" in clean
+        assert "AAPL" in clean
+        assert "$150,000 cash available" in clean
+
+    def test_no_opportunities_when_no_cash(self) -> None:
+        """No cash = no OPPORTUNITIES section."""
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+        from src.models.position import PortfolioState
+
+        regime = RegimeState(
+            regime="hold", vix=20.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70,
+            timestamp=datetime.utcnow(),
+        )
+        portfolio = PortfolioState(
+            cash_available=Decimal("0"),
+            net_liquidation=Decimal("1000000"),
+        )
+        briefing = format_local_briefing(
+            regime=regime, vix=20.0, spy_change=0.005,
+            all_signals=[], watchlist_data=[], tax_alerts=[],
+            portfolio_state=portfolio,
+        )
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
+        assert "OPPORTUNITIES" not in clean
+
+    def test_cash_status_in_header(self) -> None:
+        """Portfolio NLV and cash appear in the header."""
+        from src.main import format_local_briefing
+        from src.monitor.regime import RegimeState
+        from src.models.position import PortfolioState
+
+        regime = RegimeState(
+            regime="hold", vix=20.0, spy_change_pct=0.005,
+            severity="normal", target_deployed=0.70,
+            timestamp=datetime.utcnow(),
+        )
+        portfolio = PortfolioState(
+            cash_available=Decimal("120000"),
+            net_liquidation=Decimal("980000"),
+        )
+        briefing = format_local_briefing(
+            regime=regime, vix=20.0, spy_change=0.005,
+            all_signals=[], watchlist_data=[], tax_alerts=[],
+            portfolio_state=portfolio,
+        )
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', briefing)
+        assert "$980,000" in clean  # NLV
+        assert "$120,000" in clean  # cash
+        assert "Deployed:" in clean
+
+
 class TestYTDOrderParsing:
     """Tests for E*Trade order parsing → TaxEngine population."""
 

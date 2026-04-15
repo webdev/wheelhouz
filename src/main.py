@@ -469,6 +469,7 @@ def format_local_briefing(
     analyst_brief: str | None = None,
     position_reviews: list[PositionReview] | None = None,
     tax_engine: Any | None = None,
+    portfolio_state: Any | None = None,
 ) -> str:
     """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
     from datetime import date, timedelta
@@ -487,6 +488,13 @@ def format_local_briefing(
     lines.append(_C.bold(f"  WHEEL COPILOT — {today}"))
     lines.append(f"  {regime_fn(regime_name)} "
                  f"| VIX {vix:.1f} | SPY {spy_fn(f'{spy_change:+.2%}')}")
+    if portfolio_state and portfolio_state.net_liquidation > 0:
+        nlv = portfolio_state.net_liquidation
+        cash = portfolio_state.cash_available
+        deployed_pct = float((nlv - cash) / nlv) if nlv else 0
+        lines.append(f"  NLV: {_C.bold(f'${nlv:,.0f}')} "
+                     f"| Cash: {_C.green(f'${cash:,.0f}')} "
+                     f"| Deployed: {deployed_pct:.0%}")
     if tax_engine:
         net_ytd = (tax_engine.realized_stcg_ytd + tax_engine.realized_ltcg_ytd
                    - tax_engine.realized_losses_ytd)
@@ -612,6 +620,154 @@ def format_local_briefing(
                     f"Max profit ${r.premium * r.contracts * 100:,.0f}"
                 )
             lines.append(f"      {r.reasoning}")
+
+    # ── OPPORTUNITIES — proactive deployment recommendations ──
+    # Evaluate watchlist names NOT already covered by signal-driven recommendations
+    rec_symbols: set[str] = set()
+    if recommendations:
+        rec_symbols.update(r.symbol for r in recommendations)
+
+    opportunities: list[tuple[str, str, str, list[str]]] = []  # (symbol, type, reason, details)
+
+    cash = portfolio_state.cash_available if portfolio_state else Decimal("0")
+    nlv = portfolio_state.net_liquidation if portfolio_state else Decimal("0")
+
+    # TV consensus and intel by symbol
+    tv_by_sym: dict[str, str] = {}
+    if intel_contexts:
+        for ctx in intel_contexts:
+            if ctx.technical_consensus:
+                tv_by_sym[ctx.symbol] = ctx.technical_consensus.overall
+
+    for symbol, mkt, hist, chain, cal in watchlist_data:
+        if symbol in rec_symbols:
+            continue  # already has a signal-driven recommendation
+
+        tv = tv_by_sym.get(symbol, "")
+        rsi = hist.rsi_14
+        price = float(mkt.price) if mkt.price else 0
+        iv = mkt.iv_rank
+
+        # Skip names with bearish TV consensus
+        if tv in ("SELL", "STRONG_SELL"):
+            continue
+
+        # Skip if earnings within 14 days (don't open new through earnings)
+        if cal.next_earnings and cal.next_earnings <= date.today() + timedelta(days=14):
+            continue
+
+        details: list[str] = []
+        score = 0  # higher = more attractive
+
+        # Near support levels
+        sma200 = float(hist.sma_200) if hist.sma_200 else None
+        sma50 = float(hist.sma_50) if hist.sma_50 else None
+
+        if sma200 and price > 0:
+            pct_from_200 = (price - sma200) / sma200
+            if -0.05 <= pct_from_200 <= 0.03:
+                score += 2
+                details.append(f"Near 200 SMA (${sma200:,.0f})")
+
+        if sma50 and price > 0:
+            pct_from_50 = (price - sma50) / sma50
+            if -0.05 <= pct_from_50 <= 0.02:
+                score += 1
+                details.append(f"Near 50 SMA (${sma50:,.0f})")
+
+        # RSI pullback (not oversold enough for a signal, but attractive)
+        if rsi is not None and 30 <= rsi <= 45:
+            score += 2
+            details.append(f"RSI {rsi:.0f} — pullback territory")
+        elif rsi is not None and rsi < 30:
+            score += 3
+            details.append(f"RSI {rsi:.0f} — oversold")
+
+        # TV consensus positive
+        if tv == "STRONG_BUY":
+            score += 3
+            details.append(f"TV STRONG_BUY")
+        elif tv == "BUY":
+            score += 2
+            details.append(f"TV BUY")
+
+        # 52-week range — near low end is attractive for buys
+        if hist.high_52w > 0 and hist.low_52w > 0:
+            range_52w = float(hist.high_52w - hist.low_52w)
+            if range_52w > 0:
+                pct_in_range = (price - float(hist.low_52w)) / range_52w
+                if pct_in_range < 0.30:
+                    score += 2
+                    details.append(f"Bottom 30% of 52w range")
+
+        # IV rank for options selling
+        iv_detail = ""
+        if iv >= 50:
+            score += 2
+            iv_detail = f"IV rank {iv:.0f} — rich premium for puts"
+        elif iv >= 30:
+            score += 1
+            iv_detail = f"IV rank {iv:.0f} — decent premium"
+
+        if score < 3:
+            continue  # not enough conviction
+
+        # Determine recommendation type
+        # Long-term buy: strong technicals + near support (Engine 1)
+        # Put sell: decent IV + pullback (Engine 2)
+        rec_type = ""
+        reason = ""
+        if iv >= 40 and (rsi is not None and rsi <= 45):
+            rec_type = "SELL PUT"
+            reason = f"Sell put on pullback — {'rich' if iv >= 50 else 'decent'} premium"
+            if iv_detail:
+                details.append(iv_detail)
+        elif score >= 4 and tv in ("BUY", "STRONG_BUY"):
+            rec_type = "BUY SHARES"
+            reason = "Attractive entry — technicals + crowd consensus align"
+        elif iv >= 50:
+            rec_type = "SELL PUT"
+            reason = f"Premium rich (IV rank {iv:.0f}) — good for cash-secured puts"
+        elif score >= 3:
+            rec_type = "BUY SHARES"
+            reason = "Near support with positive technicals"
+
+        if rec_type:
+            opportunities.append((symbol, rec_type, reason, details))
+
+    # Sort by detail count (proxy for conviction) descending
+    opportunities.sort(key=lambda x: len(x[3]), reverse=True)
+
+    if opportunities and cash > 0:
+        lines.append(f"\n{_C.green(_C.bold('━━ OPPORTUNITIES ━━'))} "
+                     f"{_C.dim(f'— ${cash:,.0f} cash available')}")
+
+        for symbol, rec_type, reason, details in opportunities[:8]:  # cap at 8
+            _, mkt, hist, _, _ = next(
+                (w for w in watchlist_data if w[0] == symbol), (None,)*5
+            )
+            price = float(mkt.price) if mkt else 0
+
+            type_fn = _C.green if rec_type == "BUY SHARES" else _C.cyan
+            lines.append(f"  {type_fn(rec_type)}: {_C.bold(symbol)} @ ${price:,.2f}")
+            lines.append(f"    {reason}")
+            if details:
+                lines.append(f"    {' | '.join(details)}")
+
+            # Sizing hint based on available cash
+            if nlv > 0:
+                # Conservative: 1-2% of NLV per position
+                suggested = float(nlv) * 0.015
+                if rec_type == "BUY SHARES":
+                    shares = int(suggested / price) if price > 0 else 0
+                    if shares > 0:
+                        lines.append(f"    Size: ~{shares} shares (${shares * price:,.0f}, "
+                                     f"~{shares * price / float(nlv):.1%} NLV)")
+                else:
+                    contracts = max(1, int(suggested / (price * 100))) if price > 0 else 1
+                    collateral = contracts * price * 100
+                    lines.append(f"    Size: {contracts}x puts (${collateral:,.0f} collateral, "
+                                 f"~{collateral / float(nlv):.1%} NLV)")
 
     # ── WATCH — position holds + earnings + tax ──
     watch_positions = []
@@ -947,6 +1103,7 @@ async def run_analysis_cycle(
         analyst_brief=analyst_brief,
         position_reviews=position_reviews,
         tax_engine=tax_engine,
+        portfolio_state=portfolio_state,
     )
     print(briefing)
 

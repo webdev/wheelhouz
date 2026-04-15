@@ -26,7 +26,7 @@ logger = structlog.get_logger()
 from src.analysis.signals import detect_all_signals
 from src.analysis.sizing import size_position
 from src.analysis.strikes import find_smart_strikes
-from src.config.loader import load_watchlist, load_scanner_universe
+from src.config.loader import load_watchlist
 from src.data.events import fetch_event_calendar
 from src.data.market import fetch_market_context, fetch_options_chain, fetch_price_history
 from src.models.analysis import SizedOpportunity
@@ -191,29 +191,42 @@ def scan_wheel_candidates(
     etrade_session: object | None = None,
     max_picks: int = 8,
 ) -> list[ScannerPick]:
-    """Screen the scanner universe for high-IV wheel candidates.
+    """Discover and screen wheel candidates dynamically. No static lists.
 
-    Filters: IV rank >= 40, liquid options, price $5-$150 (affordable collateral),
-    RSI not overbought, no earnings within 14 days.
-    Returns top picks sorted by composite score (IV * yield * technicals).
+    Two-phase approach:
+    1. DISCOVER: Finviz screener finds high-vol optionable stocks (cached daily)
+    2. SCREEN: yfinance IV rank + options chain on top candidates only
+
+    This keeps the detailed (slow) screening to ~20 symbols max.
     """
-    import yfinance as yf
-    from src.data.market import calculate_iv_rank, _calculate_rsi
+    from src.data.scanner_sources import discover_scanner_universe
+    from src.data.market import calculate_iv_rank
 
-    universe = load_scanner_universe()
-    if not universe:
-        return []
-
-    # Exclude symbols already on the watchlist
-    candidates = [s for s in universe if s not in watchlist_symbols]
+    # Phase 1: Discover candidates from Finviz (cached, fast after first run)
+    candidates = discover_scanner_universe(watchlist_symbols, max_candidates=60)
     if not candidates:
+        log.info("scanner_no_candidates")
         return []
 
-    log.info("scanner_screening", candidates=len(candidates))
+    # Phase 2: Detailed screening on top candidates
+    # Finviz already pre-sorted by volatility and pre-filtered RSI/price,
+    # so we only need IV rank + chain data for the top N
+    screen_limit = min(len(candidates), 25)
+    log.info("scanner_screening", candidates=screen_limit, discovered=len(candidates))
     picks: list[ScannerPick] = []
 
-    for symbol in candidates:
+    for symbol in candidates[:screen_limit]:
         try:
+            # IV rank from yfinance historical vol
+            iv_data = calculate_iv_rank(symbol, 0)  # 0 = use HV proxy
+            iv_rank = iv_data["iv_rank"]
+
+            # IV filter: need rich premium
+            if iv_rank < 35:
+                continue
+
+            # Get current price + RSI from yfinance (Finviz data may be slightly stale)
+            import yfinance as yf
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period="3mo")
             if hist.empty or len(hist) < 20:
@@ -222,42 +235,10 @@ def scan_wheel_candidates(
             closes = [float(c) for c in hist["Close"]]
             price = closes[-1]
 
-            # Price filter: $5-$150 for affordable collateral
-            if price < 5 or price > 150:
-                continue
-
-            # RSI filter: skip overbought
+            from src.data.market import _calculate_rsi
             rsi = _calculate_rsi(closes)
             if rsi is not None and rsi > 65:
                 continue
-
-            # IV rank from yfinance historical vol
-            iv_data = calculate_iv_rank(symbol, 0)  # 0 = use HV proxy
-            iv_rank = iv_data["iv_rank"]
-
-            # IV filter: need rich premium
-            if iv_rank < 40:
-                continue
-
-            # Earnings filter: skip if within 14 days
-            try:
-                cal_info = ticker.calendar
-                if cal_info is not None:
-                    # yfinance calendar format varies
-                    earnings_date = None
-                    if isinstance(cal_info, dict) and "Earnings Date" in cal_info:
-                        ed = cal_info["Earnings Date"]
-                        if isinstance(ed, list) and ed:
-                            earnings_date = ed[0]
-                        elif hasattr(ed, "date"):
-                            earnings_date = ed
-                    if earnings_date and hasattr(earnings_date, "date"):
-                        from datetime import date as date_type, timedelta
-                        days_to_er = (earnings_date.date() - date_type.today()).days
-                        if 0 < days_to_er < 14:
-                            continue
-            except Exception:
-                pass  # calendar not available, proceed
 
             # Score: IV rank + RSI pullback + price efficiency
             score = 0.0
@@ -270,8 +251,11 @@ def scan_wheel_candidates(
             elif iv_rank >= 55:
                 score += 3
                 reasons.append(f"IV rank {iv_rank:.0f} — elevated premium")
-            else:
+            elif iv_rank >= 40:
                 score += 2
+                reasons.append(f"IV rank {iv_rank:.0f}")
+            else:
+                score += 1
                 reasons.append(f"IV rank {iv_rank:.0f}")
 
             # RSI pullback bonus
@@ -282,17 +266,12 @@ def scan_wheel_candidates(
                 score += 2
                 reasons.append(f"RSI {rsi:.0f} — pullback")
 
-            # Affordable collateral bonus (lower price = more contracts per dollar)
+            # Affordable collateral bonus
             if price <= 25:
                 score += 2
                 reasons.append(f"${price:.0f} — low collateral per contract")
             elif price <= 50:
                 score += 1
-
-            # Volume check (basic liquidity)
-            avg_vol = sum(hist["Volume"][-20:]) / 20 if len(hist) >= 20 else 0
-            if avg_vol < 500_000:
-                continue  # not liquid enough
 
             # Try to get a put contract
             put_contract = None
@@ -309,8 +288,6 @@ def scan_wheel_candidates(
                     from datetime import date as date_type
                     today = date_type.today()
                     # E*Trade provides real delta; yfinance has delta=0.0
-                    # For yfinance, use strike distance as delta proxy:
-                    # ~0.25 delta ≈ strike 5-12% below current price
                     has_delta = any(abs(p.delta) > 0.01 for p in chain.puts[:5])
                     if has_delta:
                         put_candidates = [
@@ -335,7 +312,6 @@ def scan_wheel_candidates(
                                                + abs((p.expiration - today).days - 37) / 100)
                             )
                         else:
-                            # Target ~8% OTM (approx 0.25 delta)
                             put_contract = min(
                                 put_candidates,
                                 key=lambda p: abs(float(p.strike) / price - 0.92)
@@ -372,7 +348,7 @@ def scan_wheel_candidates(
 
     # Sort by score descending, then by annualized yield
     picks.sort(key=lambda p: (p.score, p.ann_yield), reverse=True)
-    log.info("scanner_complete", picks=len(picks), screened=len(candidates))
+    log.info("scanner_complete", picks=len(picks), screened=screen_limit)
     return picks[:max_picks]
 
 
@@ -1104,7 +1080,15 @@ def format_local_briefing(
             lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
                          f"— ${cash:,.0f} cash available")
         lines.append(f"\n  🔍 {_C.bold('SCANNER PICKS')} — high-IV names outside your watchlist")
-        for pick in scanner_picks[:6]:
+        max_alloc_scanner = float(nlv) * 0.05 if nlv > 0 else 50_000
+        shown = 0
+        for pick in scanner_picks:
+            if shown >= 6:
+                break
+            # Skip if even 1 contract exceeds 5% NLV
+            if pick.collateral_per_contract > max_alloc_scanner:
+                continue
+            shown += 1
             lines.append(f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(pick.symbol)} @ ${pick.price:,.2f}")
             lines.append(f"    {' | '.join(pick.reasons)}")
             if pick.put_contract:

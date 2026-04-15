@@ -30,11 +30,6 @@ def load_watchlist() -> list[str]:
     return data.get("watchlist", [])  # type: ignore[no-any-return]
 
 
-def load_scanner_universe() -> list[str]:
-    """Load the scanner universe symbols (broader screening pool)."""
-    data = load_yaml("watchlist.yaml")
-    return data.get("scanner_universe", [])  # type: ignore[no-any-return]
-
 
 def load_accounts_config() -> dict[str, Any]:
     """Load account routing configuration."""

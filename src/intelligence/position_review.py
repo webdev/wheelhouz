@@ -467,8 +467,15 @@ def review_position(
     position: Position,
     context: IntelligenceContext,
     chain: OptionsChain | None = None,
+    is_covered: bool = False,
 ) -> PositionReview:
     """Review a single open position against current intelligence.
+
+    Args:
+        is_covered: True when a short call is backed by sufficient stock
+            (≥100 shares per contract). Covered calls that go ITM are net
+            profitable (stock gains > option loss), so loss stops and
+            "close to limit loss" advice don't apply.
 
     Priority order:
     1. CLOSE NOW — loss stop hit, earnings imminent + short-dated
@@ -491,8 +498,10 @@ def review_position(
 
     # 1. CLOSE NOW checks
     # Loss stop (short options only): close if option price rises to 2x (monthlies)
-    # or 1.5x (weeklies) what you sold it for
-    if is_short and position.entry_price > 0:
+    # or 1.5x (weeklies) what you sold it for.
+    # SKIP for covered calls — being "underwater" on the option means the stock
+    # rallied, so the combined position (stock + call) is net profitable.
+    if is_short and position.entry_price > 0 and not is_covered:
         loss_multiple = float(position.current_price / position.entry_price)
         stop_threshold = 1.5 if position.days_to_expiry <= 10 else 2.0
         if loss_multiple >= stop_threshold:
@@ -512,6 +521,16 @@ def review_position(
     )
     if earnings_before_expiry and position.days_to_expiry <= 30:
         days_to_earnings = (earnings_date - date.today()).days
+        if is_covered:
+            # Covered call through earnings: stock drop hurts shares but call
+            # expires worthless (good). Stock rally means assignment at strike
+            # + premium kept (good). The risk is a massive gap DOWN — but the
+            # call premium provides a small buffer.  Advice: hold unless you
+            # want to keep shares AND expect a big rally.
+            reason = (f"Earnings in {days_to_earnings}d — covered call, so assignment "
+                      f"risk is fine (you keep premium + strike gain). "
+                      f"If you want to keep shares through earnings, roll up and out")
+            return _make_review(position, "WATCH CLOSELY", reason, pnl, pnl_pct, roll=roll)
         if roll:
             reason = f"Earnings in {days_to_earnings}d, position expires after — close or roll before report"
         else:
@@ -628,6 +647,14 @@ def review_position(
                     f"Earnings in {days_to_earnings}d. Position is deep OTM "
                     f"(delta {pos_delta:.2f}) — unlikely to be threatened by report. "
                     f"Hold unless earnings surprise dramatically")
+            elif is_covered:
+                # Covered call "underwater" = stock rallied past strike.
+                # The combined position is profitable (stock gain > option loss).
+                watch_reasons.append(
+                    f"Earnings in {days_to_earnings}d. Call is ITM (option at {pnl_pct:.0%}) "
+                    f"but shares gained more — combined position is profitable. "
+                    f"Let it get called away at ${position.strike} + keep premium, "
+                    f"or roll up and out if you want to keep shares")
             else:
                 if roll:
                     watch_reasons.append(
@@ -646,17 +673,30 @@ def review_position(
                 action = "buy to close the put"
                 risk = (f"At-the-money puts through earnings can lose "
                         f"${float(position.strike) * 0.10 * 100:,.0f}+ on a 10% gap down")
+                watch_reasons.append(
+                    f"Earnings in {days_to_earnings}d. "
+                    f"Set alert at ${trigger_price:,.0f} — "
+                    f"if stock {direction} that level, {action} immediately. "
+                    f"{risk}")
+            elif is_covered:
+                # Covered call near the money — assignment is fine, it's the
+                # ideal wheel outcome.  Only watch if user wants to keep shares.
+                watch_reasons.append(
+                    f"Earnings in {days_to_earnings}d. Call near the money — "
+                    f"if assigned, you sell at ${position.strike} + keep "
+                    f"${position.entry_price} premium (good wheel outcome). "
+                    f"Roll up and out before earnings only if you want to keep shares")
             else:
                 trigger_price = float(position.strike) * (1 - trigger_pct)
                 direction = "rallies to"
                 action = "buy to close the call"
                 risk = (f"At-the-money calls through earnings risk assignment "
                         f"if stock gaps above ${position.strike}")
-            watch_reasons.append(
-                f"Earnings in {days_to_earnings}d. "
-                f"Set alert at ${trigger_price:,.0f} — "
-                f"if stock {direction} that level, {action} immediately. "
-                f"{risk}")
+                watch_reasons.append(
+                    f"Earnings in {days_to_earnings}d. "
+                    f"Set alert at ${trigger_price:,.0f} — "
+                    f"if stock {direction} that level, {action} immediately. "
+                    f"{risk}")
 
     # TradingView flipped strongly bearish
     tc = context.technical_consensus

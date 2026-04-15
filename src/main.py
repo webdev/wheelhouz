@@ -1407,6 +1407,34 @@ def format_local_briefing(
                 lines.append(f"  ⚠️ {_C.bold(sym)}: {cnt} positions — "
                              f"watch concentration (max 10% NLV)")
 
+    # ── CAPITAL NOTE — when significant idle cash + take-profits need redeployment ──
+    if portfolio_state and nlv > 0:
+        cash = float(portfolio_state.cash_available)
+        # Estimate collateral freed by take-profit closes
+        freed_collateral = Decimal("0")
+        for p in urgent_positions:
+            if p.action == "TAKE PROFIT" and p.option_type == "put":
+                freed_collateral += p.strike * 100 * abs(p.quantity)
+        total_idle = cash + float(freed_collateral)
+        idle_pct = total_idle / float(nlv)
+        # Only show when ≥10% of NLV is idle — worth noting
+        if idle_pct >= 0.10:
+            # Count earnings-blocked watchlist names
+            earnings_blocked = 0
+            for symbol, _, _, _, cal in watchlist_data:
+                if cal.next_earnings and cal.next_earnings <= date.today() + timedelta(days=30):
+                    earnings_blocked += 1
+            capital_lines = [
+                f"\n💰 {_C.bold('CAPITAL')}",
+                f"  Cash: ${cash:,.0f} | Freed by take-profits: ${float(freed_collateral):,.0f} | "
+                f"Total deployable: ${total_idle:,.0f} ({idle_pct:.0%} NLV)",
+            ]
+            if earnings_blocked > 0:
+                capital_lines.append(
+                    f"  ⏳ {earnings_blocked} watchlist names reporting within 30d — "
+                    f"limited deployment window. Watch for post-earnings entry points.")
+            lines.extend(capital_lines)
+
     # ── Nothing to do ──
     if not (urgent_positions or high_trades or medium_trades or low_trades
             or watch_positions):
@@ -1613,17 +1641,29 @@ async def run_analysis_cycle(
     try:
         portfolio_state = load_portfolio_state()
         if portfolio_state.positions:
+            # Build stock holdings map for covered call detection.
+            # A short call is "covered" when you own ≥100 shares per contract.
+            stock_shares: dict[str, int] = {}
+            for pos in portfolio_state.positions:
+                if pos.position_type == "long_stock":
+                    stock_shares[pos.symbol] = stock_shares.get(pos.symbol, 0) + pos.quantity
+
             for pos in portfolio_state.positions:
                 # Only review option positions — stocks need different logic
                 if not pos.option_type:
                     continue
+                # Detect covered calls: short call on a stock we own enough of
+                covered = (
+                    pos.position_type == "short_call"
+                    and stock_shares.get(pos.symbol, 0) >= abs(pos.quantity) * 100
+                )
                 # Find matching intelligence context
                 matching_ctx = next(
                     (c for c in intel_contexts if c.symbol == pos.symbol), None
                 )
                 if matching_ctx:
                     chain = chain_by_symbol.get(pos.symbol)
-                    review = review_position(pos, matching_ctx, chain=chain)
+                    review = review_position(pos, matching_ctx, chain=chain, is_covered=covered)
                     position_reviews.append(review)
     except Exception as e:
         log.warning("portfolio_load_skipped", error=str(e))

@@ -1920,3 +1920,130 @@ class TestYTDOrderParsing:
         assert "$12,000" in clean
         assert "Realized gains" in clean
         assert "Net realized" in clean
+
+
+class TestCoveredCallDetection:
+    """Covered calls (short call + owned stock) get different treatment."""
+
+    def test_covered_call_skips_loss_stop(self) -> None:
+        """A covered call at 2x premium should NOT trigger loss stop."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        # MSFT $450 call: entry $24, now $48 (2x) — would be CLOSE NOW if naked
+        pos = Position(
+            symbol="MSFT", position_type="short_call", quantity=2,
+            strike=Decimal("450"), expiration=date(2026, 12, 18),
+            entry_price=Decimal("24.00"), current_price=Decimal("48.00"),
+            underlying_price=Decimal("470"), cost_basis=Decimal("0"),
+            delta=-0.65, theta=-0.05, gamma=0.01, vega=0.10, iv=0.35,
+            days_to_expiry=248, option_type="call",
+        )
+        ctx = make_intelligence_context(
+            symbol="MSFT",
+            quant=make_quant_intelligence(trend_direction="uptrend"),
+        )
+
+        # Without is_covered → CLOSE NOW (loss stop fires)
+        result_naked = review_position(pos, ctx, is_covered=False)
+        assert result_naked.action == "CLOSE NOW"
+        assert "loss stop" in result_naked.reasoning.lower()
+
+        # With is_covered → should NOT be CLOSE NOW
+        result_covered = review_position(pos, ctx, is_covered=True)
+        assert result_covered.action != "CLOSE NOW", (
+            f"Covered call should skip loss stop, got: {result_covered.action}"
+        )
+
+    def test_covered_call_earnings_gets_watch_not_close(self) -> None:
+        """Covered call near earnings → WATCH CLOSELY, not CLOSE NOW."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from tests.fixtures.market_data import make_event_calendar
+        from src.models.position import Position
+
+        # NVDA $245 call with earnings in 12 days, 25 DTE
+        pos = Position(
+            symbol="NVDA", position_type="short_call", quantity=7,
+            strike=Decimal("245"), expiration=date.today() + timedelta(days=25),
+            entry_price=Decimal("11.50"), current_price=Decimal("14.00"),
+            underlying_price=Decimal("250"), cost_basis=Decimal("0"),
+            delta=-0.55, theta=-0.04, gamma=0.01, vega=0.08, iv=0.45,
+            days_to_expiry=25, option_type="call",
+        )
+        ctx = make_intelligence_context(
+            symbol="NVDA",
+            quant=make_quant_intelligence(trend_direction="uptrend"),
+            events=make_event_calendar(
+                next_earnings=date.today() + timedelta(days=12),
+            ),
+        )
+
+        # Naked → CLOSE NOW
+        result_naked = review_position(pos, ctx, is_covered=False)
+        assert result_naked.action == "CLOSE NOW"
+
+        # Covered → WATCH CLOSELY (assignment is fine)
+        result_covered = review_position(pos, ctx, is_covered=True)
+        assert result_covered.action == "WATCH CLOSELY", (
+            f"Covered call near earnings should WATCH, got: {result_covered.action}"
+        )
+        assert "assignment" in result_covered.reasoning.lower() or "covered" in result_covered.reasoning.lower()
+
+    def test_covered_call_underwater_earnings_shows_combined_profit(self) -> None:
+        """Covered call ITM near earnings should note combined position is profitable."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from tests.fixtures.market_data import make_event_calendar
+        from src.models.position import Position
+
+        # SOFI $25 call: entry $1.75, now $2.50 (-43% on option) but stock rallied
+        pos = Position(
+            symbol="SOFI", position_type="short_call", quantity=7,
+            strike=Decimal("25"), expiration=date(2026, 12, 18),
+            entry_price=Decimal("1.75"), current_price=Decimal("2.50"),
+            underlying_price=Decimal("27"), cost_basis=Decimal("0"),
+            delta=-0.60, theta=-0.02, gamma=0.01, vega=0.05, iv=0.55,
+            days_to_expiry=248, option_type="call",
+        )
+        ctx = make_intelligence_context(
+            symbol="SOFI",
+            quant=make_quant_intelligence(trend_direction="uptrend"),
+            events=make_event_calendar(
+                next_earnings=date.today() + timedelta(days=20),
+            ),
+        )
+
+        result = review_position(pos, ctx, is_covered=True)
+        # Should NOT say "close before report to limit loss"
+        assert "close before report to limit loss" not in result.reasoning.lower()
+        # Should mention combined position is profitable or assignment is fine
+        assert ("combined" in result.reasoning.lower()
+                or "assignment" in result.reasoning.lower()
+                or "keep shares" in result.reasoning.lower())
+
+    def test_covered_call_take_profit_still_works(self) -> None:
+        """Covered calls should still get TAKE PROFIT when premium mostly captured."""
+        from src.intelligence.position_review import review_position
+        from tests.fixtures.intelligence import make_intelligence_context, make_quant_intelligence
+        from src.models.position import Position
+
+        # TSLA $425 call: entry $8.50, now $1.00 (88% captured) — take profit
+        pos = Position(
+            symbol="TSLA", position_type="short_call", quantity=2,
+            strike=Decimal("425"), expiration=date(2026, 5, 15),
+            entry_price=Decimal("8.50"), current_price=Decimal("1.00"),
+            underlying_price=Decimal("300"), cost_basis=Decimal("0"),
+            delta=-0.02, theta=0.01, gamma=0.001, vega=0.01, iv=0.30,
+            days_to_expiry=31, option_type="call",
+        )
+        ctx = make_intelligence_context(
+            symbol="TSLA",
+            quant=make_quant_intelligence(trend_direction="range"),
+        )
+
+        result = review_position(pos, ctx, is_covered=True)
+        assert result.action == "TAKE PROFIT", (
+            f"Covered call with 88% captured should still TAKE PROFIT, got: {result.action}"
+        )

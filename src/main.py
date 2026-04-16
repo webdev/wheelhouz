@@ -45,8 +45,27 @@ from src.models.intelligence import IntelligenceContext
 from src.models.shopping_list import BenchEntry, ShoppingListEntry
 from src.data.shopping_list import fetch_shopping_list
 from src.analysis.bench import build_bench
+from src.models.market import OptionContract
 
 log = structlog.get_logger()
+
+
+@dataclass
+class LeapCandidate:
+    """A LEAP call candidate screened from the watchlist."""
+    symbol: str
+    price: float
+    iv_rank: float
+    rsi: float
+    reasons: list[str]
+    expiration: str | None = None     # "Dec 2028"
+    dte: int | None = None
+    strike: Decimal | None = None
+    delta: float | None = None
+    bid: float | None = None
+    ask: float | None = None
+    mid: float | None = None
+    open_interest: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +803,7 @@ class _C:
     GREEN = "\033[92m"
     YELLOW = "\033[93m"
     BLUE = "\033[94m"
+    MAGENTA = "\033[95m"
     CYAN = "\033[96m"
     DIM = "\033[2m"
     BOLD = "\033[1m"
@@ -797,6 +817,8 @@ class _C:
     def yellow(s: str) -> str: return f"{_C.YELLOW}{s}{_C.RESET}"
     @staticmethod
     def blue(s: str) -> str: return f"{_C.BLUE}{s}{_C.RESET}"
+    @staticmethod
+    def magenta(s: str) -> str: return f"{_C.MAGENTA}{s}{_C.RESET}"
     @staticmethod
     def cyan(s: str) -> str: return f"{_C.CYAN}{s}{_C.RESET}"
     @staticmethod
@@ -850,6 +872,7 @@ def format_local_briefing(
     portfolio_state: Any | None = None,
     scanner_picks: list[ScannerPick] | None = None,
     bench: list[BenchEntry] | None = None,
+    leap_candidates: list[LeapCandidate] | None = None,
 ) -> str:
     """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
     from datetime import date, timedelta
@@ -1099,6 +1122,10 @@ def format_local_briefing(
 
         # Skip names already over-concentrated (>5% NLV)
         if _over_concentration(symbol):
+            continue
+
+        # Skip if we already have an open option position on this name
+        if _symbol_option_count.get(symbol, 0) > 0:
             continue
 
         # ADBE: reducing concentration per policy — don't add more
@@ -1397,6 +1424,9 @@ def format_local_briefing(
             # Skip if already concentrated in this name
             if _over_concentration(pick.symbol):
                 continue
+            # Skip if we already have an open option position on this name
+            if _symbol_option_count.get(pick.symbol, 0) > 0:
+                continue
             # Don't recommend what we're closing in DO NOW
             if pick.symbol in _closing_symbols:
                 continue
@@ -1521,6 +1551,64 @@ def format_local_briefing(
                     f"${b.current_price:<7,.0f}{target_str} "
                     f"| IV {b.iv_rank:.0f} | RSI {b.rsi:.0f}{earns_str}"
                 )
+
+    # ── LEAP RADAR — low-IV names where buying calls beats selling premium ──
+    if leap_candidates:
+        # Only show candidates that have real chain data
+        with_chain = [lc for lc in leap_candidates if lc.strike is not None]
+        without_chain = [lc for lc in leap_candidates if lc.strike is None]
+
+        if with_chain or without_chain:
+            lines.append(f"\n🚀 {_C.magenta(_C.bold('LEAP RADAR'))} "
+                         f"— IV is low, consider buying calls instead of selling")
+
+        for lc in with_chain:
+            lines.append(f"  📈 {_C.green('BUY LEAP CALL')}: {_C.bold(lc.symbol)} @ ${lc.price:,.2f}")
+            lines.append(f"    {' | '.join(lc.reasons)}")
+            # Real chain data
+            delta_str = f" | {_C.bold('Delta')}: {lc.delta:.2f}" if lc.delta else ""
+            # For calls: strike < price = ITM
+            below_pct = (lc.price - float(lc.strike)) / lc.price * 100 if lc.price > 0 else 0
+            itm_label = f"{below_pct:.0f}% ITM" if below_pct > 0 else f"{abs(below_pct):.0f}% OTM"
+            lines.append(
+                f"    {_C.bold('Strike')}: ${lc.strike} ({itm_label}) "
+                f"| {_C.bold('Exp')}: {lc.expiration} ({lc.dte}d) "
+                f"| {_C.bold('Bid')}: ${lc.bid:.2f} "
+                f"| {_C.bold('Ask')}: ${lc.ask:.2f}"
+                f"{delta_str}"
+            )
+            if lc.open_interest and lc.open_interest > 0:
+                oi_str = f" | OI: {lc.open_interest:,}"
+            else:
+                oi_str = ""
+            spread = lc.ask - lc.bid if lc.ask and lc.bid else 0
+            spread_pct = (spread / lc.mid * 100) if lc.mid and lc.mid > 0 else 0
+            spread_warn = f" {_C.yellow('(wide)')}" if spread_pct > 10 else ""
+            lines.append(
+                f"    Mid: ${lc.mid:.2f}/contract (${lc.mid * 100:,.0f} total) "
+                f"| Spread: ${spread:.2f} ({spread_pct:.0f}%){spread_warn}{oi_str}"
+            )
+            # Size: 2-3% of NLV max per LEAP position
+            if nlv > 0 and lc.mid:
+                max_leap = float(nlv) * 0.03
+                cost_per = lc.mid * 100
+                contracts = max(1, int(max_leap / cost_per)) if cost_per > 0 else 1
+                contracts = min(contracts, 5)
+                total_cost = contracts * cost_per
+                lines.append(
+                    f"    Size: {contracts}x ${lc.strike} calls "
+                    f"(${total_cost:,.0f}, ~{total_cost / float(nlv):.1%} NLV)"
+                )
+
+        for lc in without_chain:
+            lines.append(f"  📈 {_C.green('BUY LEAP CALL')}: {_C.bold(lc.symbol)} @ ${lc.price:,.2f}")
+            lines.append(f"    {' | '.join(lc.reasons)}")
+            if lc.expiration:
+                lines.append(f"    Target: ~0.70 delta call, {lc.expiration} ({lc.dte}d) "
+                             f"| chain unavailable — check manually")
+            else:
+                lines.append(f"    Target: ~0.70 delta call, 12+ months out "
+                             f"| no LEAP expirations found")
 
     # ── REALLOCATE — underperforming positions to redeploy ──
     if realloc_candidates:
@@ -1939,6 +2027,143 @@ async def run_analysis_cycle(
     except Exception as e:
         log.warning("bench_build_failed", error=str(e))
 
+    # 8d. LEAP radar — screen low-IV watchlist names, fetch real LEAP chains
+    from datetime import date
+    leap_candidates: list[LeapCandidate] = []
+    try:
+        tv_by_sym_lc: dict[str, str] = {}
+        for ctx in intel_contexts:
+            if ctx.technical_consensus:
+                tv_by_sym_lc[ctx.symbol] = ctx.technical_consensus.overall
+
+        for symbol, mkt, hist, chain, cal in watchlist_data:
+            iv = mkt.iv_rank
+            rsi = hist.rsi_14 or 50.0
+            price = float(mkt.price) if mkt.price else 0
+            tv = tv_by_sym_lc.get(symbol, "")
+
+            if iv > 30:
+                continue
+
+            reasons: list[str] = []
+            score = 0.0
+
+            if rsi <= 35:
+                score += 1
+                reasons.append(f"RSI {rsi:.0f} — oversold")
+            elif rsi <= 45:
+                score += 0.5
+                reasons.append(f"RSI {rsi:.0f} — pullback")
+
+            sma200 = float(hist.sma_200) if hist.sma_200 else None
+            sma50 = float(hist.sma_50) if hist.sma_50 else None
+            if sma200 and price > 0:
+                pct_from_200 = (price - sma200) / sma200
+                if -0.05 <= pct_from_200 <= 0.02:
+                    score += 1
+                    reasons.append(f"At 200 SMA (${sma200:,.0f})")
+            if sma50 and price > 0:
+                pct_from_50 = (price - sma50) / sma50
+                if -0.03 <= pct_from_50 <= 0.01:
+                    score += 0.5
+                    reasons.append(f"Near 50 SMA (${sma50:,.0f})")
+
+            if tv in ("BUY", "STRONG_BUY"):
+                score += 1
+                reasons.append(f"TV {tv}")
+
+            if hist.high_52w > 0 and hist.low_52w > 0:
+                range_52w = float(hist.high_52w - hist.low_52w)
+                if range_52w > 0:
+                    pct_in_range = (price - float(hist.low_52w)) / range_52w
+                    if pct_in_range < 0.30:
+                        score += 1
+                        reasons.append("Bottom 30% of 52w range")
+
+            sl_entry = shopping_list_by_ticker.get(symbol)
+            if sl_entry and sl_entry.rating_tier >= 3:
+                score += 0.5
+                reasons.append(f"Shopping list: {sl_entry.rating}")
+
+            if score < 2:
+                continue
+
+            reasons.insert(0, f"IV rank {iv:.0f} — options are cheap")
+            leap_candidates.append(LeapCandidate(
+                symbol=symbol, price=price, iv_rank=iv, rsi=rsi, reasons=reasons,
+            ))
+
+        leap_candidates.sort(key=lambda x: x.iv_rank)
+        leap_candidates = leap_candidates[:5]
+
+        # Fetch real LEAP chain for each candidate
+        for lc in leap_candidates:
+            try:
+                # Get expirations list from the existing chain
+                _, _, _, existing_chain, _ = next(
+                    (w for w in watchlist_data if w[0] == lc.symbol), (None,)*5
+                )
+                exps = existing_chain.expirations if existing_chain else []
+                leap_exps = [e for e in exps
+                             if (e - date.today()).days >= 270]
+                if not leap_exps:
+                    continue
+
+                furthest = max(leap_exps)
+                lc.expiration = furthest.strftime("%b %Y")
+                lc.dte = (furthest - date.today()).days
+
+                # Fetch chain at LEAP expiration
+                leap_chain = None
+                leap_dte = (furthest - date.today()).days
+                if etrade_session:
+                    try:
+                        from src.data.broker import fetch_etrade_chain
+                        leap_chain = fetch_etrade_chain(
+                            etrade_session, lc.symbol, lc.price,
+                            target_dte=leap_dte,
+                        )
+                    except Exception:
+                        pass
+                if not leap_chain or not leap_chain.calls:
+                    leap_chain = fetch_options_chain(lc.symbol, target_dte=leap_dte)
+
+                if leap_chain and leap_chain.calls:
+                    # Find deep ITM call: strike 10-20% below current price
+                    # Deep ITM means more intrinsic value (doesn't decay) vs time value (does)
+                    has_delta = any(abs(c.delta) > 0.01 for c in leap_chain.calls)
+                    target_strike = lc.price * 0.85  # 15% below current price
+                    itm_calls = [c for c in leap_chain.calls
+                                 if float(c.strike) <= lc.price * 0.95
+                                 and float(c.bid) > 0]
+                    if has_delta:
+                        # Further filter: delta >= 0.65 ensures it tracks the stock
+                        itm_calls = [c for c in itm_calls if abs(c.delta) >= 0.65]
+                    if not itm_calls:
+                        # Fallback: any ITM call with positive bid
+                        itm_calls = [c for c in leap_chain.calls
+                                     if float(c.strike) < lc.price
+                                     and float(c.bid) > 0]
+                    if not itm_calls:
+                        continue
+                    # Pick strike closest to 15% below current price
+                    best = min(itm_calls,
+                               key=lambda c: abs(float(c.strike) - target_strike))
+
+                    if float(best.bid) <= 0:
+                        continue
+
+                    lc.strike = best.strike
+                    lc.delta = best.delta if has_delta else None
+                    lc.bid = float(best.bid)
+                    lc.ask = float(best.ask)
+                    lc.mid = float(best.mid)
+                    lc.open_interest = best.open_interest
+            except Exception as e:
+                log.warning("leap_chain_fetch_failed", symbol=lc.symbol, error=str(e))
+    except Exception as e:
+        log.warning("leap_radar_failed", error=str(e))
+
     # 9. Build and print briefing
     briefing = format_local_briefing(
         regime=regime,
@@ -1955,6 +2180,7 @@ async def run_analysis_cycle(
         portfolio_state=portfolio_state,
         scanner_picks=scanner_picks,
         bench=bench,
+        leap_candidates=leap_candidates,
     )
     print(briefing)
 

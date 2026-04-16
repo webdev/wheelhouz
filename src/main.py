@@ -211,6 +211,10 @@ class ScannerPick:
     low_52w: float | None = None   # 52-week low for support check
     shopping_list_rating: str | None = None    # e.g. "Buy", "Top 15 Stock"
     price_target: str | None = None            # e.g. "$500-550"
+    tv_overall: str | None = None              # BUY, SELL, NEUTRAL, etc.
+    tv_oscillators: str | None = None
+    tv_moving_averages: str | None = None
+    price_target_upside: float | None = None   # upside % from current price to midpoint target
 
 
 def scan_wheel_candidates(
@@ -219,98 +223,83 @@ def scan_wheel_candidates(
     max_picks: int = 8,
     shopping_list: list[ShoppingListEntry] | None = None,
 ) -> list[ScannerPick]:
-    """Discover and screen wheel candidates dynamically.
+    """Discover and screen Parkev-quality wheel candidates.
 
-    When shopping_list is provided, uses it as the primary discovery universe.
-    Falls back to Finviz if shopping list yields < 3 picks after screening.
+    Primary universe: shopping list tier >= 4 (Top 15 + Top Stock, ~15-20 names).
+    Secondary universe: tier == 3 (Buy) only if IV rank > 50 (premium justifies effort).
+    No Finviz backfill — if Parkev's top picks don't have good setups, show nothing.
+
+    Quality gates per candidate:
+    - TradingView consensus must NOT be SELL or STRONG_SELL
+    - Valid put contract with bid > $1.00
+    - Annualized yield >= 25%
+    - All existing safety filters (earnings, 52w low, broken chart, etc.)
     """
-    from src.data.scanner_sources import discover_scanner_universe
     from src.data.market import calculate_iv_rank
     from datetime import date
 
-    candidates: list[str] = []
-    sl_metadata: dict[str, Any] = {}  # ticker → ShoppingListEntry
-
-    # Phase 1: Discover candidates
-    if shopping_list:
-        # Shopping list is primary universe
-        scored: list[tuple[str, float, ShoppingListEntry]] = []
-        for entry in shopping_list:
-            if entry.ticker in watchlist_symbols:
-                continue
-            if entry.rating_tier == 0:  # Sell
-                continue
-
-            # Composite score: rating_tier * 3 + freshness_bonus
-            freshness = 0.0
-            if entry.date_updated:
-                age = (date.today() - entry.date_updated).days
-                if age <= 30:
-                    freshness = 1.0
-                elif age <= 60:
-                    freshness = 0.5
-            score = entry.rating_tier * 3 + freshness
-            scored.append((entry.ticker, score, entry))
-
-        scored.sort(key=lambda x: x[1], reverse=True)
-        candidates = [s[0] for s in scored[:40]]
-        sl_metadata = {s[0]: s[2] for s in scored}
-        log.info("scanner_shopping_list_candidates", count=len(candidates))
-    else:
-        # Fallback: Finviz discovery
-        candidates = discover_scanner_universe(watchlist_symbols, max_candidates=60)
-
-    if not candidates:
-        log.info("scanner_no_candidates")
+    if not shopping_list:
+        log.info("scanner_no_shopping_list")
         return []
 
-    # Phase 2: Detailed screening on top candidates
-    # Finviz already pre-sorted by volatility and pre-filtered RSI/price,
-    # so we only need IV rank + chain data for the top N
-    screen_limit = min(len(candidates), 25)
-    log.info("scanner_screening", candidates=screen_limit, discovered=len(candidates))
+    # Build candidate list: tier 4+5 first, then tier 3 (IV will gate tier 3 later)
+    tier_45: list[tuple[str, ShoppingListEntry]] = []
+    tier_3: list[tuple[str, ShoppingListEntry]] = []
+    for entry in shopping_list:
+        if entry.ticker in watchlist_symbols:
+            continue  # already on primary watchlist
+        if entry.rating_tier >= 4:
+            tier_45.append((entry.ticker, entry))
+        elif entry.rating_tier == 3:
+            tier_3.append((entry.ticker, entry))
+
+    # Process tier 4+5 first (all of them), then tier 3 (IV-gated below)
+    candidate_entries: list[tuple[str, ShoppingListEntry]] = tier_45 + tier_3
+    log.info("scanner_candidates", tier45=len(tier_45), tier3=len(tier_3))
+
+    if not candidate_entries:
+        return []
+
     picks: list[ScannerPick] = []
 
-    for symbol in candidates[:screen_limit]:
+    for symbol, sl_entry in candidate_entries:
+        # Hard cap — don't waste time fetching more than needed
+        if len(picks) >= max_picks * 3:
+            break
         try:
-            # IV rank from yfinance historical vol
-            iv_data = calculate_iv_rank(symbol, 0)  # 0 = use HV proxy
-            iv_rank = iv_data["iv_rank"]
-
-            # IV filter: need rich premium
-            if iv_rank < 35:
-                continue
-
-            # Get current price + RSI from yfinance (Finviz data may be slightly stale)
             import yfinance as yf
             ticker = yf.Ticker(symbol)
-            hist = ticker.history(period="3mo")
-            if hist.empty or len(hist) < 20:
+            hist_df = ticker.history(period="3mo")
+            if hist_df.empty or len(hist_df) < 20:
                 continue
 
-            closes = [float(c) for c in hist["Close"]]
+            closes = [float(c) for c in hist_df["Close"]]
             price = closes[-1]
 
-            # Market cap + earnings date from yfinance
+            # IV rank
+            iv_data = calculate_iv_rank(symbol, 0)
+            iv_rank = iv_data["iv_rank"]
+
+            # Tier 3 gate: only proceed if IV rank > 50
+            if sl_entry.rating_tier == 3 and iv_rank <= 50:
+                log.debug("scanner_tier3_iv_skip", symbol=symbol, iv_rank=iv_rank)
+                continue
+
+            # Market cap + earnings date
             mcap = 0.0
             next_earn = None
+            sma_200 = None
+            low_52w = None
+            high_52w = None
             try:
                 info = ticker.info
                 mcap = float(info.get("marketCap", 0) or 0)
-                # Earnings date — yfinance returns as unix timestamp
                 earn_ts = info.get("earningsTimestamp")
                 if earn_ts:
                     from datetime import datetime as dt_cls, date as date_cls
                     earn_date = dt_cls.fromtimestamp(int(earn_ts)).date()
                     if earn_date > date_cls.today():
                         next_earn = earn_date
-                if not next_earn:
-                    earn_ts = info.get("mostRecentQuarter")
-                    if earn_ts:
-                        from datetime import datetime as dt_cls, date as date_cls
-                        earn_date = dt_cls.fromtimestamp(int(earn_ts)).date()
-                        if earn_date > date_cls.today():
-                            next_earn = earn_date
                 if not next_earn:
                     try:
                         earn_dates = ticker.get_earnings_dates(limit=4)
@@ -321,80 +310,31 @@ def scan_wheel_candidates(
                                 next_earn = min(future)
                     except Exception:
                         pass
-            except Exception:
-                pass
-
-            from src.data.market import _calculate_rsi
-            rsi = _calculate_rsi(closes)
-            if rsi is not None and rsi > 65:
-                continue
-
-            # Technical health from ticker.info
-            sma_200 = None
-            sma_50 = None
-            low_52w = None
-            high_52w = None
-            try:
                 sma_200 = float(info.get("twoHundredDayAverage") or 0) or None
-                sma_50 = float(info.get("fiftyDayAverage") or 0) or None
                 low_52w = float(info.get("fiftyTwoWeekLow") or 0) or None
                 high_52w = float(info.get("fiftyTwoWeekHigh") or 0) or None
-            except (TypeError, ValueError):
+            except Exception:
                 pass
 
             # Skip broken charts — price >30% below SMA 200
             if sma_200 and price < sma_200 * 0.70:
                 continue
 
-            # Score: IV rank + RSI pullback + price efficiency + technical health
-            score = 0.0
-            reasons: list[str] = []
+            from src.data.market import _calculate_rsi
+            rsi = _calculate_rsi(closes)
+            if rsi is not None and rsi > 65:
+                continue
 
-            # IV attractiveness (main driver)
-            if iv_rank >= 70:
-                score += 4
-                reasons.append(f"IV rank {iv_rank:.0f} — premium rich")
-            elif iv_rank >= 55:
-                score += 3
-                reasons.append(f"IV rank {iv_rank:.0f} — elevated premium")
-            elif iv_rank >= 40:
-                score += 2
-                reasons.append(f"IV rank {iv_rank:.0f}")
-            else:
-                score += 1
-                reasons.append(f"IV rank {iv_rank:.0f}")
+            # Fetch TradingView consensus (cached; ~1.5s only on cache miss)
+            tv = fetch_tradingview_consensus(symbol)
+            tv_overall = tv.overall if tv else None
+            tv_oscillators = tv.oscillators if tv else None
+            tv_moving_averages = tv.moving_averages if tv else None
 
-            # RSI pullback bonus
-            if rsi is not None and rsi < 30:
-                score += 3
-                reasons.append(f"RSI {rsi:.0f} — oversold")
-            elif rsi is not None and rsi <= 45:
-                score += 2
-                reasons.append(f"RSI {rsi:.0f} — pullback")
-
-            # Technical structure bonus/penalty
-            if sma_200 and price > sma_200:
-                score += 1  # above 200 SMA = healthy trend
-            elif sma_200 and price < sma_200 * 0.85:
-                score -= 2  # deep below 200 SMA = broken chart, penalize
-
-            if sma_50 and price > sma_50:
-                score += 0.5  # above 50 SMA = near-term momentum
-
-            # 52-week range position — penalize bottom of range
-            if high_52w and low_52w and high_52w > low_52w:
-                range_pct = (price - low_52w) / (high_52w - low_52w)
-                if range_pct < 0.15:
-                    score -= 2  # bottom 15% of 52w range
-                elif range_pct < 0.30:
-                    score -= 1  # bottom 30%
-
-            # Affordable collateral bonus
-            if price <= 25:
-                score += 2
-                reasons.append(f"${price:.0f} — low collateral per contract")
-            elif price <= 50:
-                score += 1
+            # Quality gate: skip SELL/STRONG_SELL consensus
+            if tv_overall in ("SELL", "STRONG_SELL"):
+                log.debug("scanner_tv_skip", symbol=symbol, tv=tv_overall)
+                continue
 
             # Try to get a put contract
             put_contract = None
@@ -410,14 +350,12 @@ def scan_wheel_candidates(
                 if chain and chain.puts:
                     from datetime import date as date_type
                     today = date_type.today()
-                    # E*Trade provides real delta; yfinance has delta=0.0
                     has_delta = any(abs(p.delta) > 0.01 for p in chain.puts[:5])
 
                     def _valid_put(p: Any) -> bool:
                         dte = (p.expiration - today).days
                         if not (20 <= dte <= 55 and p.bid > 0):
                             return False
-                        # Never recommend puts that expire after earnings
                         if next_earn and p.expiration >= next_earn:
                             return False
                         return True
@@ -428,7 +366,6 @@ def scan_wheel_candidates(
                             if 0.10 <= abs(p.delta) <= 0.35 and _valid_put(p)
                         ]
                     else:
-                        # Fallback: select by strike distance (5-15% OTM)
                         put_candidates = [
                             p for p in chain.puts
                             if 0.85 <= float(p.strike) / price <= 0.95 and _valid_put(p)
@@ -452,12 +389,53 @@ def scan_wheel_candidates(
                         if strike_f > 0 and dte > 0:
                             yield_pct = (mid / strike_f) * 100
                             ann_yield = yield_pct * (365 / dte)
-                            if ann_yield >= 20:
-                                score += 2
-                            elif ann_yield >= 10:
-                                score += 1
             except Exception as e:
                 log.debug("scanner_chain_failed", symbol=symbol, error=str(e))
+
+            # Quality gate: must have a valid put with real bid > $1.00
+            if not put_contract or float(put_contract.bid) < 1.00:
+                continue
+
+            # Quality gate: annualized yield >= 25%
+            if ann_yield < 25:
+                continue
+
+            # Scoring (for sorting only — gates above already enforce quality)
+            score = 0.0
+            reasons: list[str] = []
+
+            if iv_rank >= 70:
+                score += 4
+                reasons.append(f"IV rank {iv_rank:.0f} — premium rich")
+            elif iv_rank >= 55:
+                score += 3
+                reasons.append(f"IV rank {iv_rank:.0f} — elevated premium")
+            else:
+                score += 2
+                reasons.append(f"IV rank {iv_rank:.0f}")
+
+            if rsi is not None and rsi < 30:
+                score += 3
+                reasons.append(f"RSI {rsi:.0f} — oversold")
+            elif rsi is not None and rsi <= 45:
+                score += 2
+                reasons.append(f"RSI {rsi:.0f} — pullback")
+
+            if tv_overall in ("BUY", "STRONG_BUY"):
+                score += 2
+
+            # Tier bonus: Top Stock (5) > Top 15 (4) > Buy (3)
+            score += sl_entry.rating_tier
+
+            # Price target + upside
+            price_target_str = None
+            price_target_upside = None
+            if sl_entry.price_target_2026:
+                low_t, high_t = sl_entry.price_target_2026
+                price_target_str = f"${low_t:,.0f}-{high_t:,.0f}"
+                mid_target = float(low_t + high_t) / 2
+                if price > 0:
+                    price_target_upside = (mid_target - price) / price
 
             picks.append(ScannerPick(
                 symbol=symbol,
@@ -472,62 +450,20 @@ def scan_wheel_candidates(
                 market_cap=mcap,
                 next_earnings=next_earn,
                 low_52w=low_52w,
+                shopping_list_rating=sl_entry.rating,
+                price_target=price_target_str,
+                tv_overall=tv_overall,
+                tv_oscillators=tv_oscillators,
+                tv_moving_averages=tv_moving_averages,
+                price_target_upside=price_target_upside,
             ))
-
-            # Attach shopping list metadata if available
-            if picks and picks[-1].symbol in sl_metadata:
-                sl_entry = sl_metadata[picks[-1].symbol]
-                picks[-1].shopping_list_rating = sl_entry.rating
-                if sl_entry.price_target_2026:
-                    low, high = sl_entry.price_target_2026
-                    picks[-1].price_target = f"${low:,.0f}-{high:,.0f}"
 
         except Exception as e:
             log.debug("scanner_symbol_failed", symbol=symbol, error=str(e))
             continue
 
-    # Backfill from Finviz if shopping list yielded < 3 picks
-    if shopping_list and len(picks) < 3:
-        log.info("scanner_backfilling_finviz", shopping_list_picks=len(picks))
-        existing_symbols = {p.symbol for p in picks}
-        finviz_candidates = discover_scanner_universe(watchlist_symbols, max_candidates=60)
-        for symbol in finviz_candidates:
-            if symbol in existing_symbols or symbol in watchlist_symbols:
-                continue
-            try:
-                iv_data = calculate_iv_rank(symbol, 0)
-                iv_rank = iv_data["iv_rank"]
-                if iv_rank < 35:
-                    continue
-                import yfinance as yf
-                ticker = yf.Ticker(symbol)
-                hist = ticker.history(period="3mo")
-                if hist.empty or len(hist) < 20:
-                    continue
-                closes = [float(c) for c in hist["Close"]]
-                price = closes[-1]
-                from src.data.market import _calculate_rsi
-                rsi = _calculate_rsi(closes)
-                if rsi is not None and rsi > 65:
-                    continue
-                # Simplified scoring for backfill
-                score = iv_rank / 20
-                reasons = [f"IV rank {iv_rank:.0f}", "Scanner backfill"]
-                picks.append(ScannerPick(
-                    symbol=symbol, price=price, iv_rank=iv_rank, rsi=rsi,
-                    put_contract=None, score=score, reasons=reasons,
-                    collateral_per_contract=price * 100, ann_yield=0.0,
-                ))
-                existing_symbols.add(symbol)
-                if len(picks) >= max_picks:
-                    break
-            except Exception as e:
-                log.debug("scanner_backfill_failed", symbol=symbol, error=str(e))
-                continue
-
-    # Sort by score descending, then by annualized yield
     picks.sort(key=lambda p: (p.score, p.ann_yield), reverse=True)
-    log.info("scanner_complete", picks=len(picks), screened=screen_limit)
+    log.info("scanner_complete", picks=len(picks), candidates=len(candidate_entries))
     return picks[:max_picks]
 
 
@@ -1518,7 +1454,21 @@ def format_local_briefing(
 
             shown += 1
             scanner_lines.append(f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(pick.symbol)}{tier_str} @ ${pick.price:,.2f}")
-            scanner_lines.append(f"    {' | '.join(pick.reasons)}")
+
+            # TV consensus line
+            if pick.tv_overall:
+                tv_color = _C.green if pick.tv_overall in ("BUY", "STRONG_BUY") else _C.yellow
+                osc_str = f" (Osc: {pick.tv_oscillators.title().replace('_', ' ')}" if pick.tv_oscillators else " ("
+                ma_str = f", MA: {pick.tv_moving_averages.title().replace('_', ' ')})" if pick.tv_moving_averages else ")"
+                tv_parts = osc_str + ma_str if pick.tv_oscillators or pick.tv_moving_averages else ""
+                iv_reason = next((r for r in pick.reasons if "IV rank" in r), f"IV rank {pick.iv_rank:.0f}")
+                scanner_lines.append(
+                    f"    TV: {tv_color(pick.tv_overall)}{tv_parts} | {iv_reason}"
+                )
+            else:
+                iv_reason = next((r for r in pick.reasons if "IV rank" in r), f"IV rank {pick.iv_rank:.0f}")
+                scanner_lines.append(f"    {iv_reason}")
+
             if pick.put_contract:
                 pc = pick.put_contract
                 dte = (pc.expiration - date.today()).days
@@ -1537,9 +1487,21 @@ def format_local_briefing(
                     f"    Premium: ${mid:.2f}/contract "
                     f"| Yield: {yield_pct:.1f}% ({pick.ann_yield:.0f}% ann)"
                 )
+
+            # Parkev rating + price target
+            if pick.shopping_list_rating or pick.price_target:
+                rating_str = pick.shopping_list_rating or ""
+                target_str = ""
+                if pick.price_target:
+                    if pick.price_target_upside is not None:
+                        target_str = f" | Target: {pick.price_target} ({pick.price_target_upside:+.0%})"
+                    else:
+                        target_str = f" | Target: {pick.price_target}"
+                scanner_lines.append(f"    Parkev: {_C.bold(rating_str)}{target_str}")
+
             if nlv > 0:
-                target_alloc = float(nlv) * 0.01   # conservative for scanner picks
-                max_alloc = float(nlv) * 0.02
+                target_alloc = float(nlv) * 0.015   # 1.5% NLV for Parkev-quality picks
+                max_alloc = float(nlv) * 0.05
                 if pick.put_contract:
                     strike_f = float(pick.put_contract.strike)
                     contracts = max(1, int(target_alloc / (strike_f * 100))) if strike_f > 0 else 1
@@ -1565,15 +1527,8 @@ def format_local_briefing(
         if not opportunities:
             lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
                          f"— ${cash:,.0f} cash available")
-        # Determine header based on whether picks came from shopping list
-        has_sl_picks = scanner_picks and any(p.shopping_list_rating for p in scanner_picks)
-        has_finviz = scanner_picks and any(p.shopping_list_rating is None for p in scanner_picks)
-        if has_sl_picks and has_finviz:
-            scanner_header = "from your shopping list + scanner"
-        elif has_sl_picks:
-            scanner_header = "from your shopping list"
-        else:
-            scanner_header = "high-IV names outside your watchlist"
+        # All picks come from Parkev's shopping list (tier 4+ or tier 3 with IV > 50)
+        scanner_header = "Parkev Top 15 + Top Stock quality-gated"
         lines.append(f"\n  🔍 {_C.bold('SCANNER PICKS')} — {scanner_header}")
         lines.extend(scanner_lines)
 
@@ -1689,24 +1644,89 @@ def format_local_briefing(
 
     if _core_candidates:
         lines.append(f"\n🏗️ {_C.bold('CORE POSITIONS')} — sub-lot holdings ({_C.dim('<100 shares, no covered calls')})")
+
+        # Build TV consensus lookup from intel_contexts (already fetched for watchlist)
+        _core_tv_by_sym: dict[str, Any] = {}
+        if intel_contexts:
+            for _ctx in intel_contexts:
+                if _ctx.technical_consensus:
+                    _core_tv_by_sym[_ctx.symbol] = _ctx.technical_consensus
+
+        # Build hist lookup from watchlist_data for RSI/SMA access
+        _core_hist_by_sym: dict[str, Any] = {}
+        for _sym, _mkt, _hist, _chain, _cal in watchlist_data:
+            _core_hist_by_sym[_sym] = _hist
+
         for sym, qty, cur_price, basis, pnl_pct, rec, reason in sorted(
             _core_candidates, key=lambda x: x[5]  # BUY first, then HOLD, then TRIM
         ):
             shares_needed = 100 - qty
             pnl_fn = _C.green if pnl_pct >= 0 else _C.red
             market_val = qty * float(cur_price)
+
+            # Fetch TV consensus — use cached intel context or call directly
+            tv_cons = _core_tv_by_sym.get(sym)
+            if tv_cons is None:
+                # Symbol not on primary watchlist — fetch directly (cached, fast if already fetched)
+                tv_cons = fetch_tradingview_consensus(sym)
+
+            tv_overall = tv_cons.overall if tv_cons else None
+            tv_osc = tv_cons.oscillators if tv_cons else None
+            tv_ma = tv_cons.moving_averages if tv_cons else None
+
+            # Get RSI + SMA50 from watchlist hist if available
+            hist_obj = _core_hist_by_sym.get(sym)
+            rsi_val = float(hist_obj.rsi_14) if hist_obj and hist_obj.rsi_14 else None
+            sma50_val = float(hist_obj.sma_50) if hist_obj and hist_obj.sma_50 else None
+
+            # TV-driven override: SELL consensus → force HOLD even if logic says BUY TO LOT
+            if tv_overall in ("SELL", "STRONG_SELL") and rec == "BUY TO LOT":
+                rec = "HOLD"
+                reason = f"TV {tv_overall} — don't buy into a sell signal. {reason}"
+
+            # Determine timing advice for BUY TO LOT
+            timing_advice: str | None = None
+            if rec == "BUY TO LOT":
+                if tv_overall in ("BUY", "STRONG_BUY") and rsi_val is not None and rsi_val < 50:
+                    timing_advice = f"BUY NOW — technicals confirm entry"
+                elif tv_overall in ("BUY", "STRONG_BUY") and rsi_val is not None and rsi_val > 65:
+                    entry_target = f"${sma50_val:,.0f}" if sma50_val else "the 50 SMA"
+                    timing_advice = f"WAIT FOR PULLBACK — RSI {rsi_val:.0f} overbought. Target entry: {entry_target} (SMA 50)"
+                elif tv_overall == "NEUTRAL":
+                    dca_target = f"below ${sma50_val:,.0f}" if sma50_val else "on dips"
+                    timing_advice = f"DOLLAR COST AVG — add on dips {dca_target} (SMA 50)"
+
             if rec == "BUY TO LOT":
                 rec_label = f"✅ {_C.green(_C.bold('BUY TO LOT'))}"
             elif rec == "HOLD":
                 rec_label = f"📌 {_C.yellow(_C.bold('HOLD'))}"
             else:
                 rec_label = f"♻️  {_C.red(_C.bold('TRIM'))}"
+
             lines.append(
                 f"  {rec_label}: {_C.bold(sym)} — "
-                f"{qty} shares (need {shares_needed} more) @ ${float(cur_price):,.2f} "
-                f"| ${market_val:,.0f} | basis ${float(basis):,.2f} "
-                f"({pnl_fn(f'{pnl_pct:+.0%}')})"
+                f"{qty} shares (need {shares_needed} more) @ ${float(cur_price):,.2f}"
             )
+            lines.append(
+                f"    P&L: {pnl_fn(f'{pnl_pct:+.0%}')} | basis ${float(basis):,.2f} "
+                f"| ${market_val:,.0f} market value"
+            )
+
+            # TV line
+            if tv_overall:
+                tv_color = _C.green if tv_overall in ("BUY", "STRONG_BUY") else (
+                    _C.red if tv_overall in ("SELL", "STRONG_SELL") else _C.yellow
+                )
+                osc_str = tv_osc.title().replace("_", " ") if tv_osc else "—"
+                ma_str = tv_ma.title().replace("_", " ") if tv_ma else "—"
+                rsi_display = f" | RSI {rsi_val:.0f}" if rsi_val is not None else ""
+                lines.append(
+                    f"    TV: {tv_color(tv_overall)} (Osc: {osc_str}, MA: {ma_str}){rsi_display}"
+                )
+
+            if timing_advice:
+                lines.append(f"    ⏳ {timing_advice}")
+
             lines.append(f"    {reason}")
 
     # ── LEAP RADAR — low-IV names where buying calls beats selling premium ──

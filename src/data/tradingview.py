@@ -27,7 +27,11 @@ _LAST_REQUEST_TIME: float = 0.0
 _REQUEST_DELAY = 1.5
 
 # Symbols listed on NYSE rather than NASDAQ
-_NYSE_SYMBOLS = {"PLTR", "CRM", "UBER", "TSM", "JPM", "WFC", "BAC", "GS", "V", "MA"}
+_NYSE_SYMBOLS = {
+    "PLTR", "CRM", "UBER", "TSM", "JPM", "WFC", "BAC", "GS", "V", "MA",
+    "DG", "KO", "CL", "T", "BA", "CVX", "CCL", "CLX", "CVS", "MCD", "CELH", "BROS",
+    "WMT", "PG", "JNJ", "XOM", "PFE", "UNH", "HD", "DIS", "IBM", "GE",
+}
 
 # In-memory cache for the current session
 _mem_cache: dict[str, tuple[float, TechnicalConsensus]] = {}

@@ -1584,10 +1584,12 @@ source = { virtual = "." }
 dependencies = [
     { name = "alpaca-py" },
     { name = "anthropic", extra = ["bedrock"] },
+    { name = "beautifulsoup4" },
     { name = "pyetrade" },
     { name = "python-dotenv" },
     { name = "python-telegram-bot" },
     { name = "pyyaml" },
+    { name = "requests" },
     { name = "structlog" },
     { name = "tradingview-ta" },
     { name = "yfinance" },
@@ -1604,6 +1606,7 @@ dev = [
 requires-dist = [
     { name = "alpaca-py", specifier = ">=0.20" },
     { name = "anthropic", extras = ["bedrock"], specifier = ">=0.40" },
+    { name = "beautifulsoup4", specifier = ">=4.12" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
     { name = "pyetrade", specifier = ">=2.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
@@ -1611,6 +1614,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-telegram-bot", specifier = ">=21.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "requests", specifier = ">=2.31" },
     { name = "structlog", specifier = ">=24.0" },
     { name = "tradingview-ta", specifier = ">=3.3.0" },
     { name = "yfinance", specifier = ">=0.2" },

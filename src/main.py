@@ -208,6 +208,7 @@ class ScannerPick:
     ann_yield: float  # annualized premium yield
     market_cap: float = 0.0  # in dollars, for tier labeling
     next_earnings: Any = None  # date | None — for earnings gate
+    low_52w: float | None = None   # 52-week low for support check
     shopping_list_rating: str | None = None    # e.g. "Buy", "Top 15 Stock"
     price_target: str | None = None            # e.g. "$500-550"
 
@@ -296,16 +297,30 @@ def scan_wheel_candidates(
             try:
                 info = ticker.info
                 mcap = float(info.get("marketCap", 0) or 0)
-                # Earnings date — yfinance returns as timestamp
-                earn_ts = info.get("earningsTimestamp") or info.get("mostRecentQuarter")
-                if not earn_ts:
-                    # Try the calendar approach
-                    earn_dates = ticker.get_earnings_dates(limit=4)
-                    if earn_dates is not None and not earn_dates.empty:
-                        from datetime import date as date_cls
-                        future = [d.date() for d in earn_dates.index if d.date() > date_cls.today()]
-                        if future:
-                            next_earn = min(future)
+                # Earnings date — yfinance returns as unix timestamp
+                earn_ts = info.get("earningsTimestamp")
+                if earn_ts:
+                    from datetime import datetime as dt_cls, date as date_cls
+                    earn_date = dt_cls.fromtimestamp(int(earn_ts)).date()
+                    if earn_date > date_cls.today():
+                        next_earn = earn_date
+                if not next_earn:
+                    earn_ts = info.get("mostRecentQuarter")
+                    if earn_ts:
+                        from datetime import datetime as dt_cls, date as date_cls
+                        earn_date = dt_cls.fromtimestamp(int(earn_ts)).date()
+                        if earn_date > date_cls.today():
+                            next_earn = earn_date
+                if not next_earn:
+                    try:
+                        earn_dates = ticker.get_earnings_dates(limit=4)
+                        if earn_dates is not None and not earn_dates.empty:
+                            from datetime import date as date_cls
+                            future = [d.date() for d in earn_dates.index if d.date() > date_cls.today()]
+                            if future:
+                                next_earn = min(future)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -314,7 +329,24 @@ def scan_wheel_candidates(
             if rsi is not None and rsi > 65:
                 continue
 
-            # Score: IV rank + RSI pullback + price efficiency
+            # Technical health from ticker.info
+            sma_200 = None
+            sma_50 = None
+            low_52w = None
+            high_52w = None
+            try:
+                sma_200 = float(info.get("twoHundredDayAverage") or 0) or None
+                sma_50 = float(info.get("fiftyDayAverage") or 0) or None
+                low_52w = float(info.get("fiftyTwoWeekLow") or 0) or None
+                high_52w = float(info.get("fiftyTwoWeekHigh") or 0) or None
+            except (TypeError, ValueError):
+                pass
+
+            # Skip broken charts — price >30% below SMA 200
+            if sma_200 and price < sma_200 * 0.70:
+                continue
+
+            # Score: IV rank + RSI pullback + price efficiency + technical health
             score = 0.0
             reasons: list[str] = []
 
@@ -339,6 +371,23 @@ def scan_wheel_candidates(
             elif rsi is not None and rsi <= 45:
                 score += 2
                 reasons.append(f"RSI {rsi:.0f} — pullback")
+
+            # Technical structure bonus/penalty
+            if sma_200 and price > sma_200:
+                score += 1  # above 200 SMA = healthy trend
+            elif sma_200 and price < sma_200 * 0.85:
+                score -= 2  # deep below 200 SMA = broken chart, penalize
+
+            if sma_50 and price > sma_50:
+                score += 0.5  # above 50 SMA = near-term momentum
+
+            # 52-week range position — penalize bottom of range
+            if high_52w and low_52w and high_52w > low_52w:
+                range_pct = (price - low_52w) / (high_52w - low_52w)
+                if range_pct < 0.15:
+                    score -= 2  # bottom 15% of 52w range
+                elif range_pct < 0.30:
+                    score -= 1  # bottom 30%
 
             # Affordable collateral bonus
             if price <= 25:
@@ -422,6 +471,7 @@ def scan_wheel_candidates(
                 ann_yield=ann_yield,
                 market_cap=mcap,
                 next_earnings=next_earn,
+                low_52w=low_52w,
             ))
 
             # Attach shopping list metadata if available
@@ -1430,6 +1480,14 @@ def format_local_briefing(
             # Don't recommend what we're closing in DO NOW
             if pick.symbol in _closing_symbols:
                 continue
+            # Earnings gate — never sell puts through earnings
+            if (pick.next_earnings and pick.put_contract
+                    and pick.put_contract.expiration >= pick.next_earnings):
+                continue
+            # Strike near 52-week low — no support cushion below
+            if (pick.low_52w and pick.put_contract
+                    and float(pick.put_contract.strike) <= pick.low_52w * 1.05):
+                continue
             # Minimum premium per contract — $1.00 ($100/contract) floor.
             # Tiny premiums like $0.30 aren't worth the collateral or attention.
             if pick.put_contract and float(pick.put_contract.bid) < 1.00:
@@ -1551,6 +1609,105 @@ def format_local_briefing(
                     f"${b.current_price:<7,.0f}{target_str} "
                     f"| IV {b.iv_rank:.0f} | RSI {b.rsi:.0f}{earns_str}"
                 )
+
+    # ── CORE POSITIONS — sub-lot stock holdings that can't run covered calls ──
+    # A covered call requires exactly 100 shares per contract. Any stock holding
+    # < 100 shares is "stranded" — it earns no wheel premium and ties up capital.
+    # Recommendation tiers:
+    #   BUY TO LOT  — buy X more shares to reach 100; only if cash allows and
+    #                 concentration stays under 10% NLV
+    #   HOLD        — keep as-is (strong performer, approaching LTCG, or low cost)
+    #   TRIM        — sell the position and redeploy into a name with a full lot
+    _core_candidates: list[tuple] = []
+    # (symbol, qty, cur_price, cost_basis_per_share, pnl_pct, rec, reason)
+    if portfolio_state and portfolio_state.positions and nlv > 0:
+        for sym, agg in _agg_stocks.items():
+            if sym in _INDEX_ETFS:
+                continue
+            qty = agg["quantity"]
+            if qty >= 100:
+                continue  # already a full lot — not a core problem
+            cur_price = agg["price"]
+            if cur_price <= 0:
+                continue
+            total_cost = agg["total_cost"]
+            per_share_cost = total_cost / qty if qty > 0 else cur_price
+            pnl_pct = float((cur_price - per_share_cost) / per_share_cost) if per_share_cost > 0 else 0.0
+
+            shares_needed = 100 - qty
+            buy_cost = float(cur_price) * shares_needed
+            # Post-buy exposure: (current value + buy_cost) / NLV
+            current_val = float(cur_price) * qty
+            post_exposure = (current_val + buy_cost) / _nlv_f
+
+            # Decide recommendation
+            if pnl_pct >= 0.15 and post_exposure <= 0.10 and float(cash) >= buy_cost:
+                # Strong performer, room in concentration, and cash available
+                rec = "BUY TO LOT"
+                reason = (
+                    f"up {pnl_pct:+.0%} — worth completing the lot. "
+                    f"Buy {shares_needed} shares @ ~${float(cur_price):,.2f} = ${buy_cost:,.0f}. "
+                    f"Post-buy exposure: {post_exposure:.1%} NLV"
+                )
+            elif pnl_pct >= 0.15 and post_exposure > 0.10:
+                # Good performer but already concentrated
+                rec = "HOLD"
+                reason = (
+                    f"up {pnl_pct:+.0%} but buying {shares_needed} more would push "
+                    f"exposure to {post_exposure:.1%} NLV (10% max). Hold until concentration drops."
+                )
+            elif pnl_pct >= 0.15 and float(cash) < buy_cost:
+                # Strong performer but not enough cash to complete lot
+                rec = "HOLD"
+                reason = (
+                    f"up {pnl_pct:+.0%}. Completing lot costs ${buy_cost:,.0f} "
+                    f"but only ${float(cash):,.0f} cash available. Hold or deploy cash first."
+                )
+            elif pnl_pct < -0.15:
+                # Significant loser — trim and redeploy
+                rec = "TRIM"
+                reason = (
+                    f"down {pnl_pct:+.0%} from cost basis. Can't run covered calls at {qty} shares. "
+                    f"Sell and redeploy ${current_val:,.0f} via cash-secured puts."
+                )
+            elif post_exposure <= 0.10 and float(cash) >= buy_cost:
+                # Modest performer, affordable, room exists
+                rec = "BUY TO LOT"
+                reason = (
+                    f"Buy {shares_needed} shares @ ~${float(cur_price):,.2f} = ${buy_cost:,.0f} "
+                    f"({post_exposure:.1%} NLV post-buy) to unlock covered call premium."
+                )
+            else:
+                # Default — not enough conviction or cash to act
+                rec = "HOLD"
+                reason = (
+                    f"down {pnl_pct:+.0%}. Completing lot costs ${buy_cost:,.0f}. "
+                    f"Hold until thesis clarifies."
+                )
+
+            _core_candidates.append((sym, qty, cur_price, per_share_cost, pnl_pct, rec, reason))
+
+    if _core_candidates:
+        lines.append(f"\n🏗️ {_C.bold('CORE POSITIONS')} — sub-lot holdings ({_C.dim('<100 shares, no covered calls')})")
+        for sym, qty, cur_price, basis, pnl_pct, rec, reason in sorted(
+            _core_candidates, key=lambda x: x[5]  # BUY first, then HOLD, then TRIM
+        ):
+            shares_needed = 100 - qty
+            pnl_fn = _C.green if pnl_pct >= 0 else _C.red
+            market_val = qty * float(cur_price)
+            if rec == "BUY TO LOT":
+                rec_label = f"✅ {_C.green(_C.bold('BUY TO LOT'))}"
+            elif rec == "HOLD":
+                rec_label = f"📌 {_C.yellow(_C.bold('HOLD'))}"
+            else:
+                rec_label = f"♻️  {_C.red(_C.bold('TRIM'))}"
+            lines.append(
+                f"  {rec_label}: {_C.bold(sym)} — "
+                f"{qty} shares (need {shares_needed} more) @ ${float(cur_price):,.2f} "
+                f"| ${market_val:,.0f} | basis ${float(basis):,.2f} "
+                f"({pnl_fn(f'{pnl_pct:+.0%}')})"
+            )
+            lines.append(f"    {reason}")
 
     # ── LEAP RADAR — low-IV names where buying calls beats selling premium ──
     if leap_candidates:

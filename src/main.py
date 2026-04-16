@@ -1674,10 +1674,50 @@ def format_local_briefing(
             tv_osc = tv_cons.oscillators if tv_cons else None
             tv_ma = tv_cons.moving_averages if tv_cons else None
 
-            # Get RSI + SMA50 from watchlist hist if available
+            # Get technicals from watchlist hist
             hist_obj = _core_hist_by_sym.get(sym)
             rsi_val = float(hist_obj.rsi_14) if hist_obj and hist_obj.rsi_14 else None
+            sma20_val = float(hist_obj.sma_20) if hist_obj and hist_obj.sma_20 else None
             sma50_val = float(hist_obj.sma_50) if hist_obj and hist_obj.sma_50 else None
+            sma200_val = float(hist_obj.sma_200) if hist_obj and hist_obj.sma_200 else None
+            ema9_val = float(hist_obj.ema_9) if hist_obj and hist_obj.ema_9 else None
+
+            # Dynamic entry zone: nearest support level below price
+            # Priority: SMA 20 → EMA 9 → SMA 50 (pick the closest one that's below current price)
+            support_levels: list[tuple[float, str]] = []
+            if ema9_val and ema9_val < float(cur_price):
+                support_levels.append((ema9_val, "EMA 9"))
+            if sma20_val and sma20_val < float(cur_price):
+                support_levels.append((sma20_val, "SMA 20"))
+            if sma50_val and sma50_val < float(cur_price):
+                support_levels.append((sma50_val, "SMA 50"))
+            if sma200_val and sma200_val < float(cur_price):
+                support_levels.append((sma200_val, "SMA 200"))
+            # Sort descending — highest (closest to price) first
+            support_levels.sort(key=lambda x: x[0], reverse=True)
+
+            # Pick entry target: for overbought stocks, use the nearest support
+            # that represents a meaningful pullback (>2% below price)
+            entry_target_val: float | None = None
+            entry_target_label: str | None = None
+            _cp = float(cur_price)
+            for _lvl, _lbl in support_levels:
+                if _lvl < _cp * 0.98:  # at least 2% below price
+                    entry_target_val = _lvl
+                    entry_target_label = _lbl
+                    break
+            # If no support is 2%+ below, use the highest support as a soft target
+            if entry_target_val is None and support_levels:
+                entry_target_val = support_levels[0][0]
+                entry_target_label = support_levels[0][1]
+
+            # Check earnings proximity — block put selling through earnings
+            _core_next_earn = None
+            for _ws, _wm, _wh, _wc, _wcal in watchlist_data:
+                if _ws == sym and _wcal and _wcal.next_earnings:
+                    _core_next_earn = _wcal.next_earnings
+                    break
+            earnings_soon = _core_next_earn is not None and (_core_next_earn - date.today()).days <= 14
 
             # TV-driven override: SELL consensus → force HOLD even if logic says BUY TO LOT
             if tv_overall in ("SELL", "STRONG_SELL") and rec == "BUY TO LOT":
@@ -1686,15 +1726,29 @@ def format_local_briefing(
 
             # Determine timing advice for BUY TO LOT
             timing_advice: str | None = None
+            timing_action: str | None = None  # actionable next step
             if rec == "BUY TO LOT":
                 if tv_overall in ("BUY", "STRONG_BUY") and rsi_val is not None and rsi_val < 50:
-                    timing_advice = f"BUY NOW — technicals confirm entry"
+                    timing_advice = "BUY NOW — technicals confirm entry"
+                    if earnings_soon:
+                        timing_action = f"Buy shares directly (earnings {_core_next_earn.strftime('%b %d')} — can't sell puts)"
+                    else:
+                        timing_action = f"Or sell {shares_needed // 100 or 1}x puts at ${entry_target_val:,.0f} ({entry_target_label}) to get paid while you wait" if entry_target_val else None
                 elif tv_overall in ("BUY", "STRONG_BUY") and rsi_val is not None and rsi_val > 65:
-                    entry_target = f"${sma50_val:,.0f}" if sma50_val else "the 50 SMA"
-                    timing_advice = f"WAIT FOR PULLBACK — RSI {rsi_val:.0f} overbought. Target entry: {entry_target} (SMA 50)"
+                    entry_str = f"${entry_target_val:,.0f} ({entry_target_label})" if entry_target_val else "nearest support"
+                    timing_advice = f"WAIT FOR PULLBACK — RSI {rsi_val:.0f} overbought. Entry zone: {entry_str}"
+                    if earnings_soon:
+                        timing_action = f"Earnings {_core_next_earn.strftime('%b %d')} — wait for post-report dip or buy shares if it gaps up"
+                    elif entry_target_val:
+                        put_strike = round(entry_target_val / 5) * 5  # round to nearest $5
+                        timing_action = f"Sell {shares_needed // 100 or 1}x ${put_strike} puts, 30-45 DTE — get paid to wait for your price"
                 elif tv_overall == "NEUTRAL":
-                    dca_target = f"below ${sma50_val:,.0f}" if sma50_val else "on dips"
-                    timing_advice = f"DOLLAR COST AVG — add on dips {dca_target} (SMA 50)"
+                    dca_target = f"below ${entry_target_val:,.0f} ({entry_target_label})" if entry_target_val else "on dips"
+                    timing_advice = f"DOLLAR COST AVG — add on dips {dca_target}"
+                    if earnings_soon:
+                        timing_action = f"Earnings {_core_next_earn.strftime('%b %d')} — wait for post-report clarity"
+                    else:
+                        timing_action = f"Buy 10-15 shares per week, heavier on red days"
 
             if rec == "BUY TO LOT":
                 rec_label = f"✅ {_C.green(_C.bold('BUY TO LOT'))}"
@@ -1726,6 +1780,8 @@ def format_local_briefing(
 
             if timing_advice:
                 lines.append(f"    ⏳ {timing_advice}")
+            if timing_action:
+                lines.append(f"    → {timing_action}")
 
             lines.append(f"    {reason}")
 

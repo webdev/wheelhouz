@@ -199,6 +199,34 @@ async def build_bench(
             rsi_bonus = 2.0 if rsi < 30 else (1.0 if rsi < 40 else 0.0)
             composite = entry.rating_tier * 3 + upside_norm * 2 + iv_norm + rsi_bonus
 
+            # Dynamic entry price — nearest support level
+            entry_price = None
+            entry_label = None
+            if len(close) >= 20:
+                cur = float(close.iloc[-1])
+                sma_20 = float(close.rolling(20).mean().iloc[-1])
+                ema_9 = float(close.ewm(span=9, adjust=False).mean().iloc[-1])
+                sma_50 = float(close.rolling(50).mean().iloc[-1]) if len(close) >= 50 else None
+                levels: list[tuple[float, str]] = []
+                if ema_9 > 0 and ema_9 < cur:
+                    levels.append((ema_9, "EMA 9"))
+                if sma_20 > 0 and sma_20 < cur:
+                    levels.append((sma_20, "SMA 20"))
+                if sma_50 and sma_50 > 0 and sma_50 < cur:
+                    levels.append((sma_50, "SMA 50"))
+                levels.sort(key=lambda x: x[0], reverse=True)
+                for lvl, lbl in levels:
+                    if lvl < cur * 0.98:
+                        entry_price = round(lvl, 2)
+                        entry_label = lbl
+                        break
+                if entry_price is None and levels:
+                    entry_price = round(levels[0][0], 2)
+                    entry_label = levels[0][1]
+
+            target_low = float(entry.price_target_2026[0]) if entry.price_target_2026 else None
+            target_high = float(entry.price_target_2026[1]) if entry.price_target_2026 else None
+
             bench_entry = BenchEntry(
                 ticker=ticker,
                 name=entry.name,
@@ -211,6 +239,10 @@ async def build_bench(
                 next_earnings=next_earnings_date,
                 near_actionable=actionable,
                 actionable_reason=actionable_reason,
+                entry_price=entry_price,
+                entry_label=entry_label,
+                target_low=target_low,
+                target_high=target_high,
             )
             bench_entries.append((composite, bench_entry))
 

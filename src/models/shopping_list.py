@@ -34,3 +34,7 @@ class BenchEntry:
     next_earnings: date | None
     near_actionable: bool
     actionable_reason: str | None
+    entry_price: float | None = None      # dynamic support level for entry
+    entry_label: str | None = None        # e.g. "EMA 9", "SMA 20"
+    target_low: float | None = None       # price target low
+    target_high: float | None = None      # price target high

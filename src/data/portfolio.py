@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from decimal import Decimal
+import subprocess
+import sys
 
 import structlog
 
@@ -14,21 +15,40 @@ logger = structlog.get_logger()
 def load_portfolio_state() -> PortfolioState:
     """Load current portfolio — always fresh from E*Trade.
 
-    If E*Trade is unavailable, returns empty state with a loud error rather
-    than silently using stale data that causes phantom positions.
+    If tokens are expired, auto-launches the auth flow (python -m src.data.auth --live).
+    Portfolio data is essential — we never proceed with stale data.
     """
     from src.data.auth import get_session
     from src.data.broker import fetch_portfolio
+
     try:
         session = get_session()
-        state = fetch_portfolio(session)
-    except Exception as e:
-        logger.error("portfolio_load_failed_no_fallback",
-                     error=str(e),
-                     msg="E*Trade unavailable — briefing will run without portfolio data. "
-                         "Fix auth before relying on position reviews.")
-        return PortfolioState()
+    except RuntimeError as e:
+        error_msg = str(e)
+        if "expired" in error_msg.lower() or "token" in error_msg.lower():
+            logger.warning("etrade_tokens_expired_auto_reauth",
+                           msg="Launching auth flow to refresh tokens...")
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "src.data.auth", "--live"],
+                    timeout=120,
+                )
+                if result.returncode == 0:
+                    session = get_session()
+                else:
+                    logger.error("etrade_reauth_failed",
+                                 msg="Auth flow exited with error. Run manually: "
+                                     "python -m src.data.auth --live")
+                    raise
+            except subprocess.TimeoutExpired:
+                logger.error("etrade_reauth_timeout",
+                             msg="Auth flow timed out. Run manually: "
+                                 "python -m src.data.auth --live")
+                raise RuntimeError("E*Trade auth timed out") from e
+        else:
+            raise
 
+    state = fetch_portfolio(session)
     if not state.positions:
         logger.warning("portfolio_empty", msg="E*Trade returned no positions")
         return state

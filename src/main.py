@@ -1629,6 +1629,16 @@ def format_local_briefing(
                     f"| IV {b.iv_rank:.0f} | RSI {b.rsi:.0f}{earns_str}"
                 )
                 lines.append(f"     READY: {b.actionable_reason}")
+                # Entry + target details for actionable names
+                _entry_parts: list[str] = []
+                if b.entry_price and b.entry_label:
+                    _entry_parts.append(f"Entry: ${b.entry_price:,.0f} ({b.entry_label})")
+                if b.target_low and b.target_high:
+                    _entry_parts.append(f"Target: ${b.target_low:,.0f}-{b.target_high:,.0f}")
+                elif b.target_low:
+                    _entry_parts.append(f"Target: ${b.target_low:,.0f}")
+                if _entry_parts:
+                    lines.append(f"     {' | '.join(_entry_parts)}")
             else:
                 # Compact one-liner
                 lines.append(

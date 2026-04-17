@@ -863,6 +863,46 @@ def format_local_briefing(
     """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
     from datetime import date, timedelta
 
+    def _nearest_support(price: float, hist: Any) -> tuple[float | None, str | None]:
+        """Find nearest dynamic support level below price (at least 2% below).
+
+        Checks EMA 9, SMA 20, SMA 50, SMA 200 — returns highest one that's
+        meaningfully below current price. Falls back to closest if none are 2%+ below.
+        """
+        levels: list[tuple[float, str]] = []
+        for attr, label in [
+            ("ema_9", "EMA 9"), ("sma_20", "SMA 20"),
+            ("sma_50", "SMA 50"), ("sma_200", "SMA 200"),
+        ]:
+            val = getattr(hist, attr, None)
+            if val:
+                fval = float(val)
+                if fval > 0 and fval < price:
+                    levels.append((fval, label))
+        if not levels:
+            return None, None
+        levels.sort(key=lambda x: x[0], reverse=True)  # highest first
+        for lvl, lbl in levels:
+            if lvl < price * 0.98:
+                return lvl, lbl
+        return levels[0][0], levels[0][1]
+
+    def _support_details(price: float, hist: Any) -> list[tuple[float, str]]:
+        """Return all support levels near price (within ±5%) for scoring/display."""
+        levels: list[tuple[float, str]] = []
+        for attr, label in [
+            ("ema_9", "EMA 9"), ("sma_20", "SMA 20"),
+            ("sma_50", "SMA 50"), ("sma_200", "SMA 200"),
+        ]:
+            val = getattr(hist, attr, None)
+            if val:
+                fval = float(val)
+                if fval > 0 and price > 0:
+                    pct = (price - fval) / fval
+                    if -0.05 <= pct <= 0.03:
+                        levels.append((fval, label))
+        return levels
+
     today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
     regime_tag = {"attack": "ATTACK", "hold": "HOLD", "defend": "DEFEND", "crisis": "CRISIS"}
     lines: list[str] = []
@@ -1140,21 +1180,12 @@ def format_local_briefing(
         details: list[str] = []
         score = 0  # higher = more attractive
 
-        # Near support levels
-        sma200 = float(hist.sma_200) if hist.sma_200 else None
-        sma50 = float(hist.sma_50) if hist.sma_50 else None
-
-        if sma200 and price > 0:
-            pct_from_200 = (price - sma200) / sma200
-            if -0.05 <= pct_from_200 <= 0.03:
-                score += 2
-                details.append(f"Near 200 SMA (${sma200:,.0f})")
-
-        if sma50 and price > 0:
-            pct_from_50 = (price - sma50) / sma50
-            if -0.05 <= pct_from_50 <= 0.02:
-                score += 1
-                details.append(f"Near 50 SMA (${sma50:,.0f})")
+        # Near dynamic support levels
+        nearby_supports = _support_details(price, hist)
+        for _slvl, _slbl in nearby_supports:
+            weight = 2 if "200" in _slbl else 1
+            score += weight
+            details.append(f"Near {_slbl} (${_slvl:,.0f})")
 
         # RSI pullback (not oversold enough for a signal, but attractive)
         if rsi is not None and 30 <= rsi <= 45:
@@ -1677,39 +1708,9 @@ def format_local_briefing(
             # Get technicals from watchlist hist
             hist_obj = _core_hist_by_sym.get(sym)
             rsi_val = float(hist_obj.rsi_14) if hist_obj and hist_obj.rsi_14 else None
-            sma20_val = float(hist_obj.sma_20) if hist_obj and hist_obj.sma_20 else None
-            sma50_val = float(hist_obj.sma_50) if hist_obj and hist_obj.sma_50 else None
-            sma200_val = float(hist_obj.sma_200) if hist_obj and hist_obj.sma_200 else None
-            ema9_val = float(hist_obj.ema_9) if hist_obj and hist_obj.ema_9 else None
 
-            # Dynamic entry zone: nearest support level below price
-            # Priority: SMA 20 → EMA 9 → SMA 50 (pick the closest one that's below current price)
-            support_levels: list[tuple[float, str]] = []
-            if ema9_val and ema9_val < float(cur_price):
-                support_levels.append((ema9_val, "EMA 9"))
-            if sma20_val and sma20_val < float(cur_price):
-                support_levels.append((sma20_val, "SMA 20"))
-            if sma50_val and sma50_val < float(cur_price):
-                support_levels.append((sma50_val, "SMA 50"))
-            if sma200_val and sma200_val < float(cur_price):
-                support_levels.append((sma200_val, "SMA 200"))
-            # Sort descending — highest (closest to price) first
-            support_levels.sort(key=lambda x: x[0], reverse=True)
-
-            # Pick entry target: for overbought stocks, use the nearest support
-            # that represents a meaningful pullback (>2% below price)
-            entry_target_val: float | None = None
-            entry_target_label: str | None = None
-            _cp = float(cur_price)
-            for _lvl, _lbl in support_levels:
-                if _lvl < _cp * 0.98:  # at least 2% below price
-                    entry_target_val = _lvl
-                    entry_target_label = _lbl
-                    break
-            # If no support is 2%+ below, use the highest support as a soft target
-            if entry_target_val is None and support_levels:
-                entry_target_val = support_levels[0][0]
-                entry_target_label = support_levels[0][1]
+            # Dynamic entry zone: nearest meaningful support below price
+            entry_target_val, entry_target_label = _nearest_support(float(cur_price), hist_obj) if hist_obj else (None, None)
 
             # Check earnings proximity — block put selling through earnings
             _core_next_earn = None
@@ -2288,18 +2289,11 @@ async def run_analysis_cycle(
                 score += 0.5
                 reasons.append(f"RSI {rsi:.0f} — pullback")
 
-            sma200 = float(hist.sma_200) if hist.sma_200 else None
-            sma50 = float(hist.sma_50) if hist.sma_50 else None
-            if sma200 and price > 0:
-                pct_from_200 = (price - sma200) / sma200
-                if -0.05 <= pct_from_200 <= 0.02:
-                    score += 1
-                    reasons.append(f"At 200 SMA (${sma200:,.0f})")
-            if sma50 and price > 0:
-                pct_from_50 = (price - sma50) / sma50
-                if -0.03 <= pct_from_50 <= 0.01:
-                    score += 0.5
-                    reasons.append(f"Near 50 SMA (${sma50:,.0f})")
+            nearby_supports = _support_details(price, hist)
+            for _slvl, _slbl in nearby_supports:
+                weight = 1.0 if "200" in _slbl else 0.5
+                score += weight
+                reasons.append(f"At {_slbl} (${_slvl:,.0f})")
 
             if tv in ("BUY", "STRONG_BUY"):
                 score += 1

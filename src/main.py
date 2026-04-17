@@ -248,6 +248,8 @@ def scan_wheel_candidates(
     for entry in shopping_list:
         if entry.ticker in watchlist_symbols:
             continue  # already on primary watchlist
+        if "." in entry.ticker:
+            continue  # non-US exchange (e.g. 0A5W.IL)
         if entry.rating_tier >= 4:
             tier_45.append((entry.ticker, entry))
         elif entry.rating_tier == 3:

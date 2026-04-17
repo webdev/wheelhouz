@@ -72,6 +72,8 @@ def _rank_and_filter(
             continue
         if not entry.ticker:
             continue
+        if "." in entry.ticker:
+            continue  # non-US exchange (e.g. 0A5W.IL)
         filtered.append(entry)
 
     # Sort by rating tier descending

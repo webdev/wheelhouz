@@ -152,7 +152,10 @@ def _find_best_put(chain: OptionsChain, hist: PriceHistory) -> OptionContract | 
     if price <= 0:
         return None
 
-    otm_puts = [p for p in chain.puts if float(p.strike) < price and p.bid > 0]
+    otm_puts = [
+        p for p in chain.puts
+        if float(p.strike) < price and p.bid.is_finite() and p.bid > 0
+    ]
     if not otm_puts:
         return None
 

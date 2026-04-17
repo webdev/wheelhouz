@@ -1369,7 +1369,27 @@ def format_local_briefing(
             else:
                 type_label = f"📝 {_C.cyan('SELL PUT')}"
             lines.append(f"  {type_label}: {_C.bold(symbol)} @ ${price:,.2f}")
-            lines.append(f"    {reason}")
+
+            # Thesis line — compact convergence summary
+            thesis_parts: list[str] = []
+            _tv_opp = tv_by_sym.get(symbol, "")
+            if _tv_opp:
+                thesis_parts.append(f"TV {_tv_opp}")
+            if rsi is not None:
+                if rsi < 30:
+                    thesis_parts.append(f"RSI {rsi:.0f} oversold")
+                elif rsi <= 45:
+                    thesis_parts.append(f"RSI {rsi:.0f} pullback")
+                else:
+                    thesis_parts.append(f"RSI {rsi:.0f}")
+            if iv >= 50:
+                thesis_parts.append(f"IV {iv:.0f} rich")
+            elif iv >= 30:
+                thesis_parts.append(f"IV {iv:.0f}")
+            _ns_val, _ns_lbl = _nearest_support(price, hist) if hist else (None, None)
+            if _ns_val:
+                thesis_parts.append(f"near {_ns_lbl} ${_ns_val:,.0f}")
+            lines.append(f"    Why: {' → '.join(thesis_parts)} → {rec_type}")
             if details:
                 lines.append(f"    {' | '.join(details)}")
 
@@ -1529,6 +1549,27 @@ def format_local_briefing(
                     else:
                         target_str = f" | Target: {pick.price_target}"
                 scanner_lines.append(f"    Parkev: {_C.bold(rating_str)}{target_str}")
+
+            # Thesis — why this trade makes sense
+            _thesis: list[str] = []
+            if pick.shopping_list_rating:
+                _thesis.append(f"Parkev {pick.shopping_list_rating}")
+            if pick.tv_overall in ("BUY", "STRONG_BUY"):
+                _thesis.append("technicals confirm")
+            elif pick.tv_overall == "NEUTRAL":
+                _thesis.append("technicals neutral")
+            if pick.rsi is not None and pick.rsi < 30:
+                _thesis.append(f"oversold RSI {pick.rsi:.0f}")
+            elif pick.rsi is not None and pick.rsi <= 45:
+                _thesis.append(f"pullback RSI {pick.rsi:.0f}")
+            if pick.iv_rank >= 70:
+                _thesis.append("premium rich")
+            elif pick.iv_rank >= 55:
+                _thesis.append("elevated premium")
+            if pick.price_target_upside and pick.price_target_upside > 0.20:
+                _thesis.append(f"{pick.price_target_upside:+.0%} upside to target")
+            if _thesis:
+                scanner_lines.append(f"    Why: {' + '.join(_thesis)}")
 
             if nlv > 0:
                 target_alloc = float(nlv) * 0.015   # 1.5% NLV for Parkev-quality picks
@@ -2020,27 +2061,34 @@ def format_local_briefing(
                 tv_by_symbol[ctx.symbol] = ctx.technical_consensus.overall
 
     skips: list[str] = []
-    for symbol, mkt, hist, _, _ in watchlist_data:
+    for symbol, mkt, hist, _, cal in watchlist_data:
         if symbol in covered:
             continue
         iv = mkt.iv_rank
         rsi = hist.rsi_14
         tv = tv_by_symbol.get(symbol, "")
 
-        # Determine skip reason (most important reason first)
+        skip_reasons: list[str] = []
+
+        # Earnings block — highest priority, explicitly state it
+        if cal.next_earnings and cal.next_earnings <= date.today() + timedelta(days=7):
+            days_to_earn = (cal.next_earnings - date.today()).days
+            skip_reasons.append(f"Earnings in {days_to_earn}d — can't sell options through report")
+
         if tv in ("SELL", "STRONG_SELL"):
             if iv >= 60:
-                skips.append(f"  {symbol}: TV {tv} — rich premium (IV {iv:.0f}) "
-                             f"but crowd is bearish. Wait for turn.")
+                skip_reasons.append(f"TV {tv} — rich premium (IV {iv:.0f}) but crowd is bearish. Wait for turn")
             else:
-                skips.append(f"  {symbol}: TV {tv} — bearish consensus. Stay away.")
-        elif iv > 0 and iv < 20:
-            skips.append(f"  {symbol}: IV rank {iv:.0f} — no premium to sell.")
-        elif rsi is not None and rsi > 75:
-            skips.append(f"  {symbol}: RSI {rsi:.0f} — overbought, "
-                         f"not the time to sell puts.")
+                skip_reasons.append(f"TV {tv} — bearish consensus")
+        if iv > 0 and iv < 20:
+            skip_reasons.append(f"IV rank {iv:.0f} — no premium to sell")
+        if rsi is not None and rsi > 75:
+            skip_reasons.append(f"RSI {rsi:.0f} — overbought, not the time to sell puts")
+
+        if skip_reasons:
+            skips.append(f"  {symbol}: {'. '.join(skip_reasons)}.")
         else:
-            skips.append(f"  {symbol}: No signal convergence. Sit tight.")
+            skips.append(f"  {symbol}: No signal convergence (TV {tv or '—'}, IV {iv:.0f}, RSI {rsi:.0f}). Sit tight.")
 
     if skips:
         lines.append(f"\n⏭️ {_C.dim('SKIP')}")

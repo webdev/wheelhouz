@@ -93,11 +93,21 @@ def fetch_portfolio(session: ETradeSession) -> PortfolioState:
 
         _sleep()
 
-        # Get positions
-        try:
-            portfolio = session.accounts.get_account_portfolio(account_id)
-        except Exception:
-            logger.warning("etrade_portfolio_failed", account_id=account_id)
+        # Get positions — retry once on failure (E*Trade sometimes returns 500)
+        portfolio = None
+        for _attempt in range(2):
+            try:
+                portfolio = session.accounts.get_account_portfolio(account_id)
+                break
+            except Exception as e:
+                if _attempt == 0:
+                    _sleep()
+                    continue
+                logger.error("etrade_portfolio_failed",
+                             account_id=account_id,
+                             error=str(e),
+                             msg="Account positions missing from briefing — data is incomplete")
+        if portfolio is None:
             continue
 
         if not portfolio or "PortfolioResponse" not in portfolio:

@@ -48,10 +48,15 @@ def find_smart_strikes(
         if lp <= 0 or price <= 0:
             continue
 
+        # Hard guard: puts must be OTM (strike < price), calls OTM (strike > price)
+        if direction == "sell_put" and lp >= price:
+            continue
+        if direction != "sell_put" and lp <= price:
+            continue
+
         # Estimate delta from distance (simplified — real delta comes from chain)
         if direction == "sell_put":
             distance_pct = (price - lp) / price
-            # Rough delta approximation: further OTM → lower delta
             est_delta = max(0.05, 0.50 - distance_pct * 3.0)
         else:
             distance_pct = (lp - price) / price
@@ -71,11 +76,12 @@ def find_smart_strikes(
             if near:
                 real_contract = near[0]
 
+        contract_exp = None
         if real_contract and real_contract.bid > 0:
             est_premium = real_contract.mid
             est_delta = abs(real_contract.delta) if real_contract.delta != 0 else est_delta
+            contract_exp = real_contract.expiration
         else:
-            # Estimate premium (rough: ATM IV * sqrt(DTE/365) * strike * delta-proxy)
             atm_iv = chain.atm_iv or 0.30
             time_factor = (target_dte / 365.0) ** 0.5
             est_premium = Decimal(str(round(lp * atm_iv * time_factor * est_delta * 0.5, 2)))
@@ -101,6 +107,7 @@ def find_smart_strikes(
             annualized_yield=round(ann_yield, 4),
             technical_reason=reason,
             strike_score=round(score, 1),
+            expiration=contract_exp,
         ))
 
     # Sort by score descending

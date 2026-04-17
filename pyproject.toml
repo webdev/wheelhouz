@@ -1,7 +1,7 @@
 [project]
 name = "wheelhouz"
 version = "0.1.0"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "structlog>=24.0",
     "pyyaml>=6.0",
@@ -11,6 +11,7 @@ dependencies = [
     "alpaca-py>=0.20",
     "python-telegram-bot>=21.0",
     "tradingview-ta>=3.3.0",
+    "pandas-ta>=0.3.14b0",
     "anthropic[bedrock]>=0.40",
     "requests>=2.31",
     "beautifulsoup4>=4.12",
@@ -24,7 +25,7 @@ dev = [
 ]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -32,7 +33,7 @@ check_untyped_defs = true
 strict_equality = true
 
 [[tool.mypy.overrides]]
-module = ["yaml", "pyetrade", "alpaca.*", "yfinance", "telegram.*", "structlog"]
+module = ["yaml", "pyetrade", "alpaca.*", "yfinance", "telegram.*", "structlog", "pandas_ta"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -19,6 +19,7 @@ class SmartStrike:
     annualized_yield: float
     technical_reason: str | None = None
     strike_score: float = 0.0
+    expiration: date | None = None
 
 
 @dataclass

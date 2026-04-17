@@ -547,11 +547,13 @@ def build_recommendations(
         if not strikes:
             continue
 
+        best_strike = strikes[0]
+        real_exp = best_strike.expiration or target_exp
         sized = size_position(
             symbol=symbol,
             trade_type="sell_put",
-            strike=strikes[0],
-            expiration=target_exp,
+            strike=best_strike,
+            expiration=real_exp,
             signals=sigs,
             portfolio=portfolio,
         )
@@ -594,11 +596,13 @@ def build_recommendations(
         if not strikes:
             continue
 
+        best_strike = strikes[0]
+        real_exp = best_strike.expiration or target_exp
         sized = size_position(
             symbol=symbol,
             trade_type="sell_call",
-            strike=strikes[0],
-            expiration=target_exp,
+            strike=best_strike,
+            expiration=real_exp,
             signals=sigs,
             portfolio=portfolio,
         )
@@ -655,7 +659,7 @@ def build_recommendations(
                 symbol=symbol,
                 trade_type="sell_call",
                 strike=best.strike,
-                expiration=target_exp,
+                expiration=best.expiration or target_exp,
                 premium=best.premium,
                 contracts=max_contracts,
                 capital_deployed=Decimal("0"),

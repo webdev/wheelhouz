@@ -1176,6 +1176,75 @@ def format_local_briefing(
         """
         return _symbol_exposure.get(sym, 0) / _nlv_f > threshold
 
+    # ── Build redeployment alternatives from scouts + watchlist chains ──
+    # Each entry: (symbol, ann_yield, premium_per_contract, strike, expiration, dte, rating)
+    _redeploy_alts: list[tuple[str, float, float, float, date, int, str]] = []
+    if scout_opps:
+        for s in scout_opps:
+            if s.ticker in _portfolio_symbols:
+                continue
+            if s.rec_type == "SELL PUT" and s.put_contract:
+                pc = s.put_contract
+                dte = (pc.expiration - date.today()).days
+                if dte <= 0:
+                    continue
+                strike_f = float(pc.strike)
+                mid = float(pc.mid)
+                if strike_f > 0 and mid > 0:
+                    yoc = (mid / strike_f) * 100
+                    ann = yoc * (365 / dte)
+                    _redeploy_alts.append((
+                        s.ticker, ann, mid, strike_f, pc.expiration, dte, s.rating,
+                    ))
+    for symbol, mkt, hist, chain, cal in watchlist_data:
+        if symbol in _portfolio_symbols:
+            continue
+        if not chain or not chain.puts:
+            continue
+        if cal.next_earnings and cal.next_earnings <= date.today() + timedelta(days=7):
+            continue
+        price = float(mkt.price) if mkt.price else 0
+        if price <= 0:
+            continue
+        candidates = [
+            p for p in chain.puts
+            if 0.10 <= abs(p.delta) <= 0.35
+            and 20 <= (p.expiration - date.today()).days <= 55
+            and p.bid > 0
+            and not (cal.next_earnings and p.expiration >= cal.next_earnings)
+            and float(p.strike) < price
+        ]
+        if candidates:
+            best = min(candidates, key=lambda p: abs(abs(p.delta) - 0.25))
+            dte = (best.expiration - date.today()).days
+            strike_f = float(best.strike)
+            mid = float(best.mid)
+            if strike_f > 0 and dte > 0 and mid > 0:
+                yoc = (mid / strike_f) * 100
+                ann = yoc * (365 / dte)
+                if ann >= 20:
+                    _redeploy_alts.append((
+                        symbol, ann, mid, strike_f, best.expiration, dte, "",
+                    ))
+    _redeploy_alts.sort(key=lambda x: x[1], reverse=True)
+
+    def _best_redeploy(freed_collateral: float) -> str | None:
+        """Find the best redeployment for a given amount of freed collateral."""
+        for sym, ann, mid, strike, exp, dte, rating in _redeploy_alts[:5]:
+            coll_per = strike * 100
+            if coll_per > freed_collateral * 1.2:
+                continue
+            contracts = max(1, int(freed_collateral / coll_per))
+            total_coll = contracts * coll_per
+            total_prem = contracts * mid * 100
+            rating_str = f" ({rating})" if rating else ""
+            return (
+                f"Redeploy → {sym}{rating_str}: "
+                f"{contracts}x ${strike:.0f}P exp {_fmt_exp(exp)} ({dte}d) "
+                f"@ ${mid:.2f} mid = ${total_prem:,.0f} premium ({ann:.0f}% ann)"
+            )
+        return None
+
     # ── DO NOW — urgent position actions + high conviction trades ──
     # Collect urgent items
     urgent_positions = []
@@ -1219,6 +1288,20 @@ def format_local_briefing(
                                      f"R/R {rk.risk_reward:.1f}:1")
                     for w in rk.warnings:
                         lines.append(f"          !! {w}")
+
+            # Redeployment analysis — show what freed collateral could earn
+            if p.action == "TAKE PROFIT" and p.strike > 0 and p.quantity != 0:
+                close_cost = float(p.current_price) * 100 * abs(p.quantity)
+                freed = float(p.strike) * 100 * abs(p.quantity) - close_cost
+                remaining = (float(p.entry_price) - float(p.current_price)) * 100 * abs(p.quantity)
+                remaining = max(remaining, 0)
+                remaining_ann = 0.0
+                if p.days_to_expiry > 0 and float(p.strike) > 0:
+                    remaining_ann = (remaining / (float(p.strike) * 100 * abs(p.quantity))) * (365 / p.days_to_expiry) * 100
+                alt = _best_redeploy(freed)
+                if alt:
+                    lines.append(f"    💱 Remaining if held: ${remaining:,.0f} over {p.days_to_expiry}d ({remaining_ann:.0f}% ann)")
+                    lines.append(f"    💱 {alt}")
 
         for r in high_trades:
             # Skip if we already have an open position in the same direction
@@ -2519,6 +2602,20 @@ def format_local_briefing(
                                      f"R/R {rk.risk_reward:.1f}:1")
                     for w in rk.warnings:
                         lines.append(f"          {_C.yellow('!!')} {w}")
+
+            # Redeployment analysis for profitable WATCH positions
+            if (p.pnl_pct >= 0.30 or float(p.current_pnl) >= 1000) and p.strike > 0 and p.quantity != 0:
+                close_cost = float(p.current_price) * 100 * abs(p.quantity)
+                freed = float(p.strike) * 100 * abs(p.quantity) - close_cost
+                remaining = (float(p.entry_price) - float(p.current_price)) * 100 * abs(p.quantity)
+                remaining = max(remaining, 0)
+                remaining_ann = 0.0
+                if p.days_to_expiry > 0 and float(p.strike) > 0:
+                    remaining_ann = (remaining / (float(p.strike) * 100 * abs(p.quantity))) * (365 / p.days_to_expiry) * 100
+                alt = _best_redeploy(freed)
+                if alt:
+                    lines.append(f"    💱 Remaining if held: ${remaining:,.0f} over {p.days_to_expiry}d ({remaining_ann:.0f}% ann)")
+                    lines.append(f"    💱 {alt}")
 
         if upcoming_earnings:
             lines.append("")

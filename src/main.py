@@ -470,6 +470,203 @@ def scan_wheel_candidates(
 
 
 # ---------------------------------------------------------------------------
+# Shopping list scout — deep-dive on near-actionable bench names
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScoutOpportunity:
+    """A shopping list name with real chain data and a specific trade setup."""
+    ticker: str
+    name: str
+    rating: str
+    current_price: float
+    iv_rank: float
+    rsi: float
+    price_target: str | None
+    upside_pct: float | None
+    entry_price: float | None
+    entry_label: str | None
+    next_earnings: date | None
+    actionable_reason: str
+    put_contract: Any | None  # OptionContract — real chain contract
+    ann_yield: float
+    collateral: float
+    score: float
+    rec_type: str  # "SELL PUT" or "BUY SHARES"
+
+
+def scout_shopping_list(
+    bench: list[BenchEntry],
+    etrade_session: object | None = None,
+    nlv: Decimal | None = None,
+    max_scouts: int = 8,
+) -> list[ScoutOpportunity]:
+    """Deep-dive the bench: fetch real E*Trade chains for near-actionable names.
+
+    Takes bench entries (already screened by build_bench with yfinance RSI/IV/earnings),
+    fetches real option chains, finds specific put contracts, and returns actionable
+    trade setups with contract details.
+
+    Also considers non-actionable bench names if they have high upside and good rating.
+    """
+    from datetime import date
+    from src.data.market import fetch_options_chain
+
+    if not bench:
+        return []
+
+    # Prioritize: near-actionable first, then high-upside non-actionable
+    actionable = [b for b in bench if b.near_actionable]
+    non_actionable = [
+        b for b in bench if not b.near_actionable
+        and b.upside_pct is not None and b.upside_pct > 0.30
+    ]
+    candidates = actionable + non_actionable
+    candidates = candidates[:max_scouts + 4]  # fetch a few extra to account for failures
+
+    scouts: list[ScoutOpportunity] = []
+
+    log.info("scout_candidates", actionable=len(actionable),
+             non_actionable=len(non_actionable), total=len(candidates))
+
+    for b in candidates:
+        try:
+            price = float(b.current_price)
+            if price <= 0:
+                continue
+
+            # Fetch real chain — E*Trade preferred, yfinance fallback
+            chain = None
+            if etrade_session:
+                try:
+                    from src.data.broker import fetch_etrade_chain
+                    chain = fetch_etrade_chain(etrade_session, b.ticker, price)
+                except Exception as e:
+                    log.debug("scout_etrade_chain_failed", ticker=b.ticker, error=str(e))
+            if not chain or not chain.puts:
+                chain = fetch_options_chain(b.ticker)
+
+            puts_count = len(chain.puts) if chain and chain.puts else 0
+            log.debug("scout_chain", ticker=b.ticker, puts=puts_count)
+
+            if not chain or not chain.puts:
+                log.debug("scout_no_chain", ticker=b.ticker)
+                if nlv and price * 100 <= float(nlv) * 0.05:
+                    reason = b.actionable_reason or "High-rated on shopping list"
+                    scouts.append(ScoutOpportunity(
+                        ticker=b.ticker, name=b.name, rating=b.rating,
+                        current_price=price, iv_rank=b.iv_rank, rsi=b.rsi,
+                        price_target=b.price_target, upside_pct=b.upside_pct,
+                        entry_price=b.entry_price, entry_label=b.entry_label,
+                        next_earnings=b.next_earnings,
+                        actionable_reason=reason,
+                        put_contract=None, ann_yield=0.0, collateral=0.0,
+                        score=b.iv_rank * 0.3 + (b.upside_pct or 0) * 100,
+                        rec_type="BUY SHARES",
+                    ))
+                continue
+
+            # Find best put: 0.20-0.30 delta, 30-45 DTE, expires before earnings
+            today = date.today()
+            has_delta = any(abs(p.delta) > 0.01 for p in chain.puts[:5])
+
+            def _valid(p: Any) -> bool:
+                dte = (p.expiration - today).days
+                if not (20 <= dte <= 55 and p.bid > 0):
+                    return False
+                if b.next_earnings and p.expiration >= b.next_earnings:
+                    return False
+                # OTM only
+                if float(p.strike) >= price:
+                    return False
+                return True
+
+            if has_delta:
+                put_candidates = [
+                    p for p in chain.puts
+                    if 0.10 <= abs(p.delta) <= 0.35 and _valid(p)
+                ]
+            else:
+                put_candidates = [
+                    p for p in chain.puts
+                    if 0.85 <= float(p.strike) / price <= 0.95 and _valid(p)
+                ]
+
+            log.debug("scout_put_filter", ticker=b.ticker,
+                       has_delta=has_delta, candidates=len(put_candidates),
+                       total_puts=puts_count)
+
+            put_contract = None
+            ann_yield = 0.0
+            collateral = 0.0
+
+            if put_candidates:
+                if has_delta:
+                    put_contract = min(
+                        put_candidates,
+                        key=lambda p: (abs(abs(p.delta) - 0.25)
+                                       + abs((p.expiration - today).days - 37) / 100)
+                    )
+                else:
+                    put_contract = min(
+                        put_candidates,
+                        key=lambda p: abs(float(p.strike) / price - 0.92)
+                    )
+                strike_f = float(put_contract.strike)
+                mid = float(put_contract.mid)
+                dte = (put_contract.expiration - today).days
+                collateral = strike_f * 100
+                if strike_f > 0 and dte > 0:
+                    yield_pct = (mid / strike_f) * 100
+                    ann_yield = yield_pct * (365 / dte)
+
+            # Quality gates
+            if put_contract and float(put_contract.bid) < 0.50:
+                put_contract = None
+
+            # Decide rec type
+            if put_contract and ann_yield >= 15:
+                rec_type = "SELL PUT"
+                log.debug("scout_hit", ticker=b.ticker, rec="SELL PUT",
+                          strike=float(put_contract.strike), ann_yield=round(ann_yield, 1))
+            elif nlv and price * 100 <= float(nlv) * 0.05:
+                rec_type = "BUY SHARES"
+                log.debug("scout_hit", ticker=b.ticker, rec="BUY SHARES")
+            else:
+                log.debug("scout_skip_no_contract", ticker=b.ticker,
+                          has_put=put_contract is not None, ann_yield=round(ann_yield, 1))
+                continue
+
+            reason = b.actionable_reason or "High-rated on shopping list"
+
+            # Composite score: IV + upside + yield + rating
+            upside_score = min((b.upside_pct or 0) * 100, 50)
+            iv_score = min(b.iv_rank, 100) * 0.3
+            yield_score = min(ann_yield, 50) * 0.4
+            scout_score = upside_score + iv_score + yield_score
+
+            scouts.append(ScoutOpportunity(
+                ticker=b.ticker, name=b.name, rating=b.rating,
+                current_price=price, iv_rank=b.iv_rank, rsi=b.rsi,
+                price_target=b.price_target, upside_pct=b.upside_pct,
+                entry_price=b.entry_price, entry_label=b.entry_label,
+                next_earnings=b.next_earnings,
+                actionable_reason=reason,
+                put_contract=put_contract, ann_yield=ann_yield,
+                collateral=collateral, score=scout_score,
+                rec_type=rec_type,
+            ))
+
+        except Exception as e:
+            log.debug("scout_failed", ticker=b.ticker, error=str(e))
+            continue
+
+    scouts.sort(key=lambda s: s.score, reverse=True)
+    log.info("scout_complete", scouts=len(scouts))
+    return scouts[:max_scouts]
+
+
+# ---------------------------------------------------------------------------
 # Recommendation engine — turns signals into sized trade proposals
 # ---------------------------------------------------------------------------
 
@@ -865,6 +1062,7 @@ def format_local_briefing(
     scanner_picks: list[ScannerPick] | None = None,
     bench: list[BenchEntry] | None = None,
     leap_candidates: list[LeapCandidate] | None = None,
+    scout_opps: list[ScoutOpportunity] | None = None,
 ) -> str:
     """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
     from datetime import date, timedelta
@@ -949,6 +1147,7 @@ def format_local_briefing(
     # Aggregates all positions (stock + options collateral) by symbol as % of NLV
     _symbol_exposure: dict[str, float] = {}  # symbol → total exposure in dollars
     _symbol_option_count: dict[str, int] = {}  # symbol → number of open option positions
+    _open_directions: set[tuple[str, str]] = set()  # (symbol, "sell_put"|"sell_call")
     if portfolio_state and portfolio_state.positions and nlv > 0:
         for pos in portfolio_state.positions:
             sym = pos.symbol
@@ -963,6 +1162,11 @@ def format_local_briefing(
                     val = float(pos.market_value) if pos.market_value else 0
                 _symbol_exposure[sym] = _symbol_exposure.get(sym, 0) + val
                 _symbol_option_count[sym] = _symbol_option_count.get(sym, 0) + 1
+                if pos.position_type == "short_put":
+                    _open_directions.add((sym, "sell_put"))
+                elif pos.position_type == "short_call":
+                    _open_directions.add((sym, "sell_call"))
+    _portfolio_symbols: set[str] = set(_symbol_exposure.keys())
     _nlv_f = float(nlv) if nlv > 0 else 1.0
 
     def _over_concentration(sym: str, threshold: float = 0.10) -> bool:
@@ -1017,6 +1221,9 @@ def format_local_briefing(
                         lines.append(f"          !! {w}")
 
         for r in high_trades:
+            # Skip if we already have an open position in the same direction
+            if (r.symbol, r.trade_type) in _open_directions:
+                continue
             # Skip if symbol already has >= 3 option positions open
             if _symbol_option_count.get(r.symbol, 0) >= 3:
                 continue
@@ -1077,6 +1284,9 @@ def format_local_briefing(
     consider_lines: list[str] = []
     if medium_trades or low_trades:
         for r in medium_trades + low_trades:
+            # Skip if we already have an open position in the same direction
+            if (r.symbol, r.trade_type) in _open_directions:
+                continue
             # Same concentration / position-cap guards as DO NOW
             if _symbol_option_count.get(r.symbol, 0) >= 3:
                 continue
@@ -1150,6 +1360,10 @@ def format_local_briefing(
 
         # Don't recommend opening what we're closing in DO NOW
         if symbol in _closing_symbols:
+            continue
+
+        # Portfolio positions belong in WATCH, not here
+        if symbol in _portfolio_symbols:
             continue
 
         # Skip names already over-concentrated (>5% NLV)
@@ -1284,6 +1498,43 @@ def format_local_briefing(
 
     # Sort by detail count (proxy for conviction) descending
     opportunities.sort(key=lambda x: len(x[3]), reverse=True)
+
+    # ── Classify scouts into GOOD ENTRY (promote to OPPORTUNITIES) vs WAIT/CAUTION ──
+    _good_entry_scouts: list[ScoutOpportunity] = []
+    _monitoring_scouts: list[ScoutOpportunity] = []
+    if scout_opps:
+        for s in scout_opps:
+            if s.ticker in _portfolio_symbols:
+                continue
+            flags: list[str] = []
+            if s.rec_type == "SELL PUT" and s.put_contract:
+                bid = float(s.put_contract.bid)
+                if s.iv_rank < 30:
+                    flags.append("low IV")
+                if s.rsi > 70:
+                    flags.append("overbought")
+                if bid < 1.00:
+                    flags.append("thin premium")
+                if s.next_earnings:
+                    if (s.next_earnings - date.today()).days <= 14:
+                        flags.append("near earnings")
+                if s.entry_price and s.current_price > 0:
+                    if (s.current_price - s.entry_price) / s.current_price > 0.05:
+                        flags.append("above entry")
+            else:
+                if s.rsi > 70:
+                    flags.append("overbought")
+                if s.entry_price and s.current_price > 0:
+                    if (s.current_price - s.entry_price) / s.current_price > 0.05:
+                        flags.append("above entry")
+                if s.next_earnings:
+                    if (s.next_earnings - date.today()).days <= 14:
+                        flags.append("near earnings")
+            if len(flags) == 0:
+                _good_entry_scouts.append(s)
+            else:
+                _monitoring_scouts.append(s)
+    _promoted_scout_symbols: set[str] = {s.ticker for s in _good_entry_scouts}
 
     # ── Reallocation candidates: underperforming stock that could be redeployed ──
     _INDEX_ETFS = {"VOO", "SPY", "IWM", "QQQ", "SMH", "DIA", "VTI", "SCHD"}
@@ -1450,6 +1701,178 @@ def format_local_briefing(
                     lines.append(f"    Size: ~{contracts}x puts (${collateral:,.0f} collateral, "
                                  f"~{collateral / float(nlv):.1%} NLV)")
 
+        # ── GOOD ENTRY scouts promoted into OPPORTUNITIES ──
+        _scout_nlv_f = float(nlv) if nlv and nlv > 0 else 1_000_000
+        for s in _good_entry_scouts:
+            _s_target = ""
+            if s.price_target:
+                if s.upside_pct is not None:
+                    _s_target = f" → ${s.price_target} ({s.upside_pct:+.0%})"
+                else:
+                    _s_target = f" → ${s.price_target}"
+            _s_earns = ""
+            if s.next_earnings:
+                days_to = (s.next_earnings - date.today()).days
+                _s_earns = f" | Earns {s.next_earnings.strftime('%b')} {s.next_earnings.day} ({days_to}d)"
+
+            # Build "good" reasons for display
+            _ge_good: list[str] = []
+            if s.iv_rank >= 50:
+                _ge_good.append(f"IV {s.iv_rank:.0f} — premium rich")
+            elif s.iv_rank >= 30:
+                _ge_good.append(f"IV {s.iv_rank:.0f} — decent premium")
+            if s.rsi < 35:
+                _ge_good.append(f"RSI {s.rsi:.0f} — oversold")
+            elif s.rsi <= 45:
+                _ge_good.append(f"RSI {s.rsi:.0f} — pullback territory")
+            if s.entry_price and s.current_price > 0:
+                dist = (s.current_price - s.entry_price) / s.current_price
+                if dist <= 0.02:
+                    _ge_good.append(f"Near entry ${s.entry_price:,.0f} ({s.entry_label})")
+            _ge_timing = f"🟢 {_C.green('GOOD ENTRY')} — {'; '.join(_ge_good)}" if _ge_good else f"🟢 {_C.green('GOOD ENTRY')}"
+
+            if s.rec_type == "SELL PUT" and s.put_contract:
+                pc = s.put_contract
+                dte = (pc.expiration - date.today()).days
+                mid = float(pc.mid)
+                bid = float(pc.bid)
+                strike_f = float(pc.strike)
+                yield_on_cap = (mid / strike_f) * 100 if strike_f > 0 else 0
+                ann_yield = yield_on_cap * (365 / dte) if dte > 0 else 0
+
+                lines.append(
+                    f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(s.ticker)} @ ${s.current_price:,.2f} — "
+                    f"{s.rating}{_s_target}"
+                )
+                lines.append(f"    {_ge_timing}")
+                lines.append(f"    Why: {s.actionable_reason}")
+                lines.append(
+                    f"    {_C.bold('Strike')}: ${pc.strike} "
+                    f"| {_C.bold('Exp')}: {_fmt_exp(pc.expiration)} ({dte}d) "
+                    f"| {_C.bold('Bid')}: ${bid:.2f} "
+                    f"| {_C.bold('Delta')}: {abs(pc.delta):.2f}"
+                )
+                lines.append(
+                    f"    Premium: ${mid:.2f}/contract "
+                    f"| Yield: {yield_on_cap:.1f}% ({ann_yield:.0f}% ann) "
+                    f"| IV {s.iv_rank:.0f} | RSI {s.rsi:.0f}{_s_earns}"
+                )
+                target_alloc = _scout_nlv_f * 0.015
+                max_alloc = _scout_nlv_f * 0.05
+                contracts = max(1, int(target_alloc / s.collateral)) if s.collateral > 0 else 1
+                contracts = min(contracts, 10)
+                total_collateral = contracts * s.collateral
+                while total_collateral > max_alloc and contracts > 1:
+                    contracts -= 1
+                    total_collateral = contracts * s.collateral
+                total_premium = contracts * mid * 100
+                lines.append(
+                    f"    Size: {contracts}x ${pc.strike} puts "
+                    f"(${total_collateral:,.0f} collateral, ${total_premium:,.0f} premium, "
+                    f"~{total_collateral / _scout_nlv_f:.1%} NLV)"
+                )
+            else:
+                cost_100 = s.current_price * 100
+                lines.append(
+                    f"  🟩 {_C.green('BUY SHARES')}: {_C.bold(s.ticker)} @ ${s.current_price:,.2f} — "
+                    f"{s.rating}{_s_target}"
+                )
+                lines.append(f"    {_ge_timing}")
+                lines.append(f"    Why: {s.actionable_reason}")
+                lines.append(
+                    f"    IV {s.iv_rank:.0f} (too low for puts) | RSI {s.rsi:.0f}{_s_earns}"
+                )
+                lines.append(
+                    f"    Size: 100 shares @ ${s.current_price:,.2f} = ${cost_100:,.0f} "
+                    f"(~{cost_100 / _scout_nlv_f:.1%} NLV) — then sell covered calls"
+                )
+
+    # Also show OPPORTUNITIES header for GOOD ENTRY scouts when no watchlist opportunities
+    if not opportunities and _good_entry_scouts and cash > 0:
+        lines.append(f"\n🎯 {_C.green(_C.bold('OPPORTUNITIES'))} "
+                     f"— ${cash:,.0f} cash available")
+        _scout_nlv_f = float(nlv) if nlv and nlv > 0 else 1_000_000
+        for s in _good_entry_scouts:
+            _s_target = ""
+            if s.price_target:
+                if s.upside_pct is not None:
+                    _s_target = f" → ${s.price_target} ({s.upside_pct:+.0%})"
+                else:
+                    _s_target = f" → ${s.price_target}"
+            _s_earns = ""
+            if s.next_earnings:
+                days_to = (s.next_earnings - date.today()).days
+                _s_earns = f" | Earns {s.next_earnings.strftime('%b')} {s.next_earnings.day} ({days_to}d)"
+            _ge_good: list[str] = []
+            if s.iv_rank >= 50:
+                _ge_good.append(f"IV {s.iv_rank:.0f} — premium rich")
+            elif s.iv_rank >= 30:
+                _ge_good.append(f"IV {s.iv_rank:.0f} — decent premium")
+            if s.rsi < 35:
+                _ge_good.append(f"RSI {s.rsi:.0f} — oversold")
+            elif s.rsi <= 45:
+                _ge_good.append(f"RSI {s.rsi:.0f} — pullback territory")
+            if s.entry_price and s.current_price > 0:
+                dist = (s.current_price - s.entry_price) / s.current_price
+                if dist <= 0.02:
+                    _ge_good.append(f"Near entry ${s.entry_price:,.0f} ({s.entry_label})")
+            _ge_timing = f"🟢 {_C.green('GOOD ENTRY')} — {'; '.join(_ge_good)}" if _ge_good else f"🟢 {_C.green('GOOD ENTRY')}"
+
+            if s.rec_type == "SELL PUT" and s.put_contract:
+                pc = s.put_contract
+                dte = (pc.expiration - date.today()).days
+                mid = float(pc.mid)
+                bid = float(pc.bid)
+                strike_f = float(pc.strike)
+                yield_on_cap = (mid / strike_f) * 100 if strike_f > 0 else 0
+                ann_yield = yield_on_cap * (365 / dte) if dte > 0 else 0
+                lines.append(
+                    f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(s.ticker)} @ ${s.current_price:,.2f} — "
+                    f"{s.rating}{_s_target}"
+                )
+                lines.append(f"    {_ge_timing}")
+                lines.append(f"    Why: {s.actionable_reason}")
+                lines.append(
+                    f"    {_C.bold('Strike')}: ${pc.strike} "
+                    f"| {_C.bold('Exp')}: {_fmt_exp(pc.expiration)} ({dte}d) "
+                    f"| {_C.bold('Bid')}: ${bid:.2f} "
+                    f"| {_C.bold('Delta')}: {abs(pc.delta):.2f}"
+                )
+                lines.append(
+                    f"    Premium: ${mid:.2f}/contract "
+                    f"| Yield: {yield_on_cap:.1f}% ({ann_yield:.0f}% ann) "
+                    f"| IV {s.iv_rank:.0f} | RSI {s.rsi:.0f}{_s_earns}"
+                )
+                target_alloc = _scout_nlv_f * 0.015
+                max_alloc = _scout_nlv_f * 0.05
+                contracts = max(1, int(target_alloc / s.collateral)) if s.collateral > 0 else 1
+                contracts = min(contracts, 10)
+                total_collateral = contracts * s.collateral
+                while total_collateral > max_alloc and contracts > 1:
+                    contracts -= 1
+                    total_collateral = contracts * s.collateral
+                total_premium = contracts * mid * 100
+                lines.append(
+                    f"    Size: {contracts}x ${pc.strike} puts "
+                    f"(${total_collateral:,.0f} collateral, ${total_premium:,.0f} premium, "
+                    f"~{total_collateral / _scout_nlv_f:.1%} NLV)"
+                )
+            else:
+                cost_100 = s.current_price * 100
+                lines.append(
+                    f"  🟩 {_C.green('BUY SHARES')}: {_C.bold(s.ticker)} @ ${s.current_price:,.2f} — "
+                    f"{s.rating}{_s_target}"
+                )
+                lines.append(f"    {_ge_timing}")
+                lines.append(f"    Why: {s.actionable_reason}")
+                lines.append(
+                    f"    IV {s.iv_rank:.0f} (too low for puts) | RSI {s.rsi:.0f}{_s_earns}"
+                )
+                lines.append(
+                    f"    Size: 100 shares @ ${s.current_price:,.2f} = ${cost_100:,.0f} "
+                    f"(~{cost_100 / _scout_nlv_f:.1%} NLV) — then sell covered calls"
+                )
+
     # ── SCANNER PICKS — high-IV wheel candidates from broader universe ──
     scanner_lines: list[str] = []
     if scanner_picks:
@@ -1467,8 +1890,11 @@ def format_local_briefing(
             # Skip if already concentrated in this name
             if _over_concentration(pick.symbol):
                 continue
-            # Skip if we already have an open option position on this name
-            if _symbol_option_count.get(pick.symbol, 0) > 0:
+            # Portfolio positions belong in WATCH, not here
+            if pick.symbol in _portfolio_symbols:
+                continue
+            # Already promoted to OPPORTUNITIES from scout
+            if pick.symbol in _promoted_scout_symbols:
                 continue
             # Don't recommend what we're closing in DO NOW
             if pick.symbol in _closing_symbols:
@@ -1614,6 +2040,10 @@ def format_local_briefing(
     if bench:
         lines.append(f"\n📋 {_C.bold('BENCH')} — shopping list names approaching entry")
         for b in bench:
+            if b.ticker in _portfolio_symbols:
+                continue
+            if b.ticker in _promoted_scout_symbols:
+                continue
             # Price target + upside
             target_str = ""
             if b.price_target:
@@ -1652,6 +2082,129 @@ def format_local_briefing(
                     f"${b.current_price:<7,.0f}{target_str} "
                     f"| IV {b.iv_rank:.0f} | RSI {b.rsi:.0f}{earns_str}"
                 )
+
+    # ── SCOUT — monitoring list (WAIT/CAUTION items only — GOOD ENTRY promoted to OPPORTUNITIES) ──
+    if _monitoring_scouts:
+        lines.append(f"\n🔭 {_C.bold('SCOUT')} — monitoring for better entry")
+        _scout_nlv_f2 = float(nlv) if nlv and nlv > 0 else 1_000_000
+        for s in _monitoring_scouts:
+            _s_target = ""
+            if s.price_target:
+                if s.upside_pct is not None:
+                    _s_target = f" → ${s.price_target} ({s.upside_pct:+.0%})"
+                else:
+                    _s_target = f" → ${s.price_target}"
+            _s_earns = ""
+            if s.next_earnings:
+                days_to = (s.next_earnings - date.today()).days
+                _s_earns = f" | Earns {s.next_earnings.strftime('%b')} {s.next_earnings.day} ({days_to}d)"
+
+            if s.rec_type == "SELL PUT" and s.put_contract:
+                pc = s.put_contract
+                dte = (pc.expiration - date.today()).days
+                mid = float(pc.mid)
+                bid = float(pc.bid)
+                strike_f = float(pc.strike)
+
+                _flags: list[str] = []
+                _good: list[str] = []
+                if s.iv_rank < 30:
+                    _flags.append(f"IV {s.iv_rank:.0f} — selling cheap premium")
+                elif s.iv_rank >= 50:
+                    _good.append(f"IV {s.iv_rank:.0f} — premium rich")
+                else:
+                    _good.append(f"IV {s.iv_rank:.0f} — decent premium")
+                if s.rsi > 70:
+                    _flags.append(f"RSI {s.rsi:.0f} — overbought, pullback risk")
+                elif s.rsi < 35:
+                    _good.append(f"RSI {s.rsi:.0f} — oversold, attractive entry")
+                elif s.rsi <= 45:
+                    _good.append(f"RSI {s.rsi:.0f} — pullback territory")
+                if bid < 1.00:
+                    _flags.append(f"Bid ${bid:.2f} — thin premium, wide spread risk")
+                if s.next_earnings:
+                    days_earns = (s.next_earnings - date.today()).days
+                    if days_earns <= 14:
+                        _flags.append(f"Earnings in {days_earns}d — binary risk")
+                if s.entry_price and s.current_price > 0:
+                    dist_to_entry = (s.current_price - s.entry_price) / s.current_price
+                    if dist_to_entry > 0.05:
+                        _flags.append(f"Price ${s.current_price:,.0f} is {dist_to_entry:.0%} above entry ${s.entry_price:,.0f}")
+                    elif dist_to_entry <= 0.02:
+                        _good.append(f"Near entry zone ${s.entry_price:,.0f} ({s.entry_label})")
+
+                if len(_flags) >= 2:
+                    _timing = f"⏳ {_C.yellow('WAIT')} — {'; '.join(_flags)}"
+                elif _flags:
+                    _timing = f"⚡ {_C.yellow('CAUTION')} — {_flags[0]}"
+                    if _good:
+                        _timing += f". But: {'; '.join(_good)}"
+                else:
+                    _timing = ""
+
+                lines.append(
+                    f"  📝 {_C.cyan('SELL PUT')}: {_C.bold(s.ticker)} — "
+                    f"{s.rating}{_s_target}"
+                )
+                if _timing:
+                    lines.append(f"    {_timing}")
+                lines.append(f"    Why: {s.actionable_reason}")
+                lines.append(
+                    f"    {_C.bold('Strike')}: ${pc.strike} "
+                    f"| {_C.bold('Exp')}: {_fmt_exp(pc.expiration)} ({dte}d) "
+                    f"| {_C.bold('Bid')}: ${bid:.2f} "
+                    f"| {_C.bold('Delta')}: {abs(pc.delta):.2f}"
+                )
+                lines.append(
+                    f"    Premium: ${mid:.2f}/contract "
+                    f"| Yield: {mid / strike_f * 100:.1f}% ({s.ann_yield:.0f}% ann) "
+                    f"| IV {s.iv_rank:.0f} | RSI {s.rsi:.0f}{_s_earns}"
+                )
+                _s_entry_parts: list[str] = []
+                if s.entry_price and s.entry_label:
+                    _s_entry_parts.append(f"Entry: ${s.entry_price:,.0f} ({s.entry_label})")
+                if s.price_target:
+                    _s_entry_parts.append(f"Target: ${s.price_target}")
+                if _s_entry_parts:
+                    lines.append(f"    {' | '.join(_s_entry_parts)}")
+            else:
+                cost_100 = s.current_price * 100
+                _sf: list[str] = []
+                _sg: list[str] = []
+                if s.rsi > 70:
+                    _sf.append(f"RSI {s.rsi:.0f} — overbought, wait for pullback")
+                elif s.rsi < 35:
+                    _sg.append(f"RSI {s.rsi:.0f} — oversold, attractive entry")
+                elif s.rsi <= 45:
+                    _sg.append(f"RSI {s.rsi:.0f} — pullback territory")
+                if s.entry_price and s.current_price > 0:
+                    dist = (s.current_price - s.entry_price) / s.current_price
+                    if dist > 0.05:
+                        _sf.append(f"Price ${s.current_price:,.0f} is {dist:.0%} above entry ${s.entry_price:,.0f}")
+                    elif dist <= 0.02:
+                        _sg.append(f"Near entry zone ${s.entry_price:,.0f} ({s.entry_label})")
+                if s.next_earnings:
+                    days_earns = (s.next_earnings - date.today()).days
+                    if days_earns <= 14:
+                        _sf.append(f"Earnings in {days_earns}d — wait for post-report")
+                if _sf:
+                    _stiming = f"⏳ {_C.yellow('WAIT')} — {'; '.join(_sf)}"
+                elif _sg:
+                    _stiming = f"⚡ {_C.yellow('CAUTION')} — {'; '.join(_sg)}"
+                else:
+                    _stiming = ""
+                lines.append(
+                    f"  🟩 {_C.green('BUY SHARES')}: {_C.bold(s.ticker)} — "
+                    f"{s.rating}{_s_target}"
+                )
+                if _stiming:
+                    lines.append(f"    {_stiming}")
+                lines.append(f"    Why: {s.actionable_reason}")
+                lines.append(
+                    f"    IV {s.iv_rank:.0f} (too low for puts) | RSI {s.rsi:.0f}{_s_earns}"
+                )
+                if s.entry_price and s.entry_label:
+                    lines.append(f"    Wait for entry: ${s.entry_price:,.0f} ({s.entry_label})")
 
     # ── CORE POSITIONS — sub-lot stock holdings that can't run covered calls ──
     # A covered call requires exactly 100 shares per contract. Any stock holding
@@ -2325,6 +2878,16 @@ async def run_analysis_cycle(
     except Exception as e:
         log.warning("bench_build_failed", error=str(e))
 
+    # 8c2. Scout — deep-dive near-actionable bench names with real chains
+    scout_opps: list[ScoutOpportunity] = []
+    try:
+        _scout_nlv = portfolio_state.net_liquidation if portfolio_state else None
+        scout_opps = scout_shopping_list(
+            bench, etrade_session=etrade_session, nlv=_scout_nlv,
+        )
+    except Exception as e:
+        log.warning("scout_failed", error=str(e))
+
     # 8d. LEAP radar — screen low-IV watchlist names, fetch real LEAP chains
     from datetime import date
     leap_candidates: list[LeapCandidate] = []
@@ -2472,6 +3035,7 @@ async def run_analysis_cycle(
         scanner_picks=scanner_picks,
         bench=bench,
         leap_candidates=leap_candidates,
+        scout_opps=scout_opps,
     )
     print(briefing)
 

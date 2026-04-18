@@ -1046,6 +1046,23 @@ def _format_position_desc(p: PositionReview) -> str:
     return f"{p.symbol} {qty_str} {p.expiration} ${p.strike} {p.option_type}"
 
 
+def _support_details(price: float, hist: Any) -> list[tuple[float, str]]:
+    """Return all support levels near price (within +/-5%) for scoring/display."""
+    levels: list[tuple[float, str]] = []
+    for attr, label in [
+        ("ema_9", "EMA 9"), ("sma_20", "SMA 20"),
+        ("sma_50", "SMA 50"), ("sma_200", "SMA 200"),
+    ]:
+        val = getattr(hist, attr, None)
+        if val:
+            fval = float(val)
+            if fval > 0 and price > 0:
+                pct = (price - fval) / fval
+                if -0.05 <= pct <= 0.03:
+                    levels.append((fval, label))
+    return levels
+
+
 def format_local_briefing(
     regime: RegimeState,
     vix: float,
@@ -1063,6 +1080,7 @@ def format_local_briefing(
     bench: list[BenchEntry] | None = None,
     leap_candidates: list[LeapCandidate] | None = None,
     scout_opps: list[ScoutOpportunity] | None = None,
+    etrade_session: object | None = None,
 ) -> str:
     """Format an action-oriented briefing. Structure: DO NOW → CONSIDER → WATCH → MARKET."""
     from datetime import date, timedelta
@@ -1091,21 +1109,7 @@ def format_local_briefing(
                 return lvl, lbl
         return levels[0][0], levels[0][1]
 
-    def _support_details(price: float, hist: Any) -> list[tuple[float, str]]:
-        """Return all support levels near price (within ±5%) for scoring/display."""
-        levels: list[tuple[float, str]] = []
-        for attr, label in [
-            ("ema_9", "EMA 9"), ("sma_20", "SMA 20"),
-            ("sma_50", "SMA 50"), ("sma_200", "SMA 200"),
-        ]:
-            val = getattr(hist, attr, None)
-            if val:
-                fval = float(val)
-                if fval > 0 and price > 0:
-                    pct = (price - fval) / fval
-                    if -0.05 <= pct <= 0.03:
-                        levels.append((fval, label))
-        return levels
+    # _support_details is now at module level (used by both briefing and leap radar)
 
     today = datetime.now(timezone.utc).strftime("%A, %B %d, %Y")
     regime_tag = {"attack": "ATTACK", "hold": "HOLD", "defend": "DEFEND", "crisis": "CRISIS"}
@@ -2479,6 +2483,95 @@ def format_local_briefing(
 
             lines.append(f"    {reason}")
 
+            # PMCC alternative: when BUY TO LOT is expensive, show diagonal spread option
+            if rec == "BUY TO LOT" and buy_cost >= 8_000:
+                _pmcc_chain = None
+                try:
+                    _, _pm, _ph, _pc_chain, _pcal = next(
+                        (w for w in watchlist_data if w[0] == sym), (None,)*5
+                    )
+                    if _pc_chain:
+                        _pmcc_exps = [e for e in _pc_chain.expirations
+                                      if (e - date.today()).days >= 270]
+                        if _pmcc_exps:
+                            _pmcc_exp = max(_pmcc_exps)
+                            _pmcc_dte = (_pmcc_exp - date.today()).days
+                            # Fetch chain centered on deep ITM strikes (~80% of price)
+                            _pmcc_strike_center = float(cur_price) * 0.80
+                            if etrade_session:
+                                try:
+                                    from src.data.broker import fetch_etrade_chain
+                                    _pmcc_chain = fetch_etrade_chain(
+                                        etrade_session, sym, _pmcc_strike_center,
+                                        target_dte=_pmcc_dte,
+                                    )
+                                except Exception:
+                                    pass
+                            if not _pmcc_chain or not _pmcc_chain.calls:
+                                _pmcc_chain = fetch_options_chain(sym, target_dte=_pmcc_dte)
+                except Exception:
+                    pass
+
+                if _pmcc_chain and _pmcc_chain.calls:
+                    _p = float(cur_price)
+                    _itm_calls = [c for c in _pmcc_chain.calls
+                                  if float(c.strike) <= _p * 0.85
+                                  and float(c.bid) > 0]
+                    if any(abs(c.delta) > 0.01 for c in _itm_calls[:5]):
+                        _itm_calls = [c for c in _itm_calls if abs(c.delta) >= 0.70]
+                    if _itm_calls:
+                        _leap = min(_itm_calls, key=lambda c: abs(float(c.strike) / _p - 0.80))
+                        _leap_cost = float(_leap.mid) * 100
+                        _shares_cost = float(cur_price) * shares_needed
+
+                        # Find monthly OTM call to sell against LEAP
+                        _short_call = None
+                        _monthly_exps = [e for e in _pc_chain.expirations
+                                         if 25 <= (e - date.today()).days <= 50]
+                        if _monthly_exps and _pc_chain.calls:
+                            _m_exp = min(_monthly_exps, key=lambda e: abs((e - date.today()).days - 37))
+                            _otm = [c for c in _pc_chain.calls
+                                    if float(c.strike) > _p * 1.05
+                                    and c.expiration == _m_exp
+                                    and float(c.bid) > 0]
+                            if _otm:
+                                _short_call = min(_otm, key=lambda c: abs(abs(c.delta) - 0.25))
+
+                        _leap_dte = (_leap.expiration - date.today()).days
+                        _below_pct = (_p - float(_leap.strike)) / _p * 100
+                        _saved = _shares_cost - _leap_cost
+                        lines.append(f"    {_C.magenta('── PMCC ALTERNATIVE (Diagonal Spread) ──')}")
+                        lines.append(
+                            f"    Buy LEAP: ${_leap.strike} call "
+                            f"({_below_pct:.0f}% ITM"
+                            f"{f', δ{_leap.delta:.2f}' if abs(_leap.delta) > 0.01 else ''}) "
+                            f"exp {_fmt_exp(_leap.expiration)} ({_leap_dte}d)"
+                        )
+                        lines.append(
+                            f"    Cost: ${_leap_cost:,.0f} vs buying {shares_needed} shares @ ${_shares_cost:,.0f} "
+                            f"→ {_C.green(f'saves ${_saved:,.0f}')}"
+                        )
+                        if _short_call:
+                            _sc_dte = (_short_call.expiration - date.today()).days
+                            _sc_mid = float(_short_call.mid)
+                            _monthly_income = _sc_mid * 100
+                            _ann_income = _monthly_income * (365 / _sc_dte) if _sc_dte > 0 else 0
+                            _pmcc_yield = (_ann_income / _leap_cost * 100) if _leap_cost > 0 else 0
+                            _breakeven = float(_leap.strike) + float(_leap.mid)
+                            lines.append(
+                                f"    Sell monthly: ${_short_call.strike} call "
+                                f"exp {_fmt_exp(_short_call.expiration)} ({_sc_dte}d) "
+                                f"@ ${_sc_mid:.2f} mid"
+                                f"{f' | δ{_short_call.delta:.2f}' if abs(_short_call.delta) > 0.01 else ''}"
+                            )
+                            lines.append(
+                                f"    Income: ${_monthly_income:,.0f}/month ({_pmcc_yield:.0f}% ann on LEAP cost) "
+                                f"| Break-even: ${_breakeven:,.0f}"
+                            )
+                        lines.append(
+                            f"    E*Trade: enter as {_C.bold('Diagonal')} order (single ticket)"
+                        )
+
     # ── LEAP RADAR — low-IV names where buying calls beats selling premium ──
     if leap_candidates:
         # Only show candidates that have real chain data
@@ -2551,6 +2644,288 @@ def format_local_briefing(
             )
             lines.append(f"    {reason}")
             lines.append(f"    💵 Frees ${value:,.0f} → redeploy via puts")
+
+    # ── STRATEGY UPGRADES — covered strangles and collars on existing holdings ──
+    _strat_lines: list[str] = []
+    if portfolio_state and portfolio_state.positions and nlv > 0:
+        # Build per-symbol state: shares, existing short calls, existing short puts, cost basis
+        _stk: dict[str, int] = {}  # symbol → total shares
+        _short_calls: dict[str, list] = {}  # symbol → list of short call positions
+        _short_puts: dict[str, list] = {}  # symbol → list of short put positions
+        _cost_basis: dict[str, Decimal] = {}  # symbol → avg per-share cost
+        for pos in portfolio_state.positions:
+            sym = pos.symbol
+            if pos.position_type == "long_stock":
+                _stk[sym] = _stk.get(sym, 0) + pos.quantity
+                # Normalize cost basis per share
+                cb = pos.cost_basis
+                if pos.quantity > 1 and cb > pos.underlying_price * 3:
+                    cb = cb / pos.quantity
+                if sym not in _cost_basis:
+                    _cost_basis[sym] = cb
+            elif pos.position_type == "short_call":
+                _short_calls.setdefault(sym, []).append(pos)
+            elif pos.position_type == "short_put":
+                _short_puts.setdefault(sym, []).append(pos)
+
+        for sym, shares in _stk.items():
+            if shares < 100 or sym in _INDEX_ETFS:
+                continue
+
+            cur_price = Decimal("0")
+            for pos in portfolio_state.positions:
+                if pos.symbol == sym and pos.underlying_price > 0:
+                    cur_price = pos.underlying_price
+                    break
+            if cur_price <= 0:
+                continue
+
+            lots = shares // 100
+            has_calls = sym in _short_calls
+            has_puts = sym in _short_puts
+            call_contracts = sum(abs(p.quantity) for p in _short_calls.get(sym, []))
+            put_contracts = sum(abs(p.quantity) for p in _short_puts.get(sym, []))
+            basis = _cost_basis.get(sym, cur_price)
+            pnl_pct = float((cur_price - basis) / basis) if basis > 0 else 0.0
+            unrealized_gain = float(cur_price - basis) * shares
+
+            # Skip if earnings within 14 days — no new options
+            _scal = None
+            for _ws, _wm, _wh, _wc, _wcal in watchlist_data:
+                if _ws == sym:
+                    _scal = _wcal
+                    break
+            if _scal and _scal.next_earnings and (_scal.next_earnings - date.today()).days <= 14:
+                continue
+
+            # Get chain for this symbol
+            _s_chain = None
+            for _ws, _wm, _wh, _wc, _wcal in watchlist_data:
+                if _ws == sym and _wc:
+                    _s_chain = _wc
+                    break
+
+            if not _s_chain:
+                continue
+
+            _cprice = float(cur_price)
+            _monthly_exps = [e for e in _s_chain.expirations
+                             if 25 <= (e - date.today()).days <= 55]
+            if not _monthly_exps:
+                continue
+            _m_exp = min(_monthly_exps, key=lambda e: abs((e - date.today()).days - 37))
+            _m_dte = (_m_exp - date.today()).days
+
+            # ── COVERED STRANGLE: has calls but no puts (or vice versa) ──
+            uncovered_put_lots = lots - put_contracts
+            uncovered_call_lots = lots - call_contracts
+            if uncovered_put_lots > 0 and has_calls and _s_chain.puts:
+                # Find OTM put for the missing leg
+                _puts = [p for p in _s_chain.puts
+                         if float(p.strike) < _cprice * 0.90
+                         and p.expiration == _m_exp
+                         and float(p.bid) > 0]
+                if not _puts:
+                    _puts = [p for p in _s_chain.puts
+                             if float(p.strike) < _cprice
+                             and 0.10 <= abs(p.delta) <= 0.30
+                             and 20 <= (p.expiration - date.today()).days <= 55
+                             and float(p.bid) > 0]
+                if _puts:
+                    if any(abs(p.delta) > 0.01 for p in _puts[:3]):
+                        _best_put = min(_puts, key=lambda p: abs(abs(p.delta) - 0.20))
+                    else:
+                        _best_put = min(_puts, key=lambda p: abs(float(p.strike) / _cprice - 0.85))
+                    _bp = _best_put
+                    _bp_dte = (_bp.expiration - date.today()).days
+                    _bp_mid = float(_bp.mid)
+                    _bp_strike = float(_bp.strike)
+                    _bp_contracts = min(uncovered_put_lots, lots)
+                    _bp_collateral = _bp_strike * 100 * _bp_contracts
+                    _bp_premium = _bp_mid * 100 * _bp_contracts
+                    _bp_yoc = (_bp_mid / _bp_strike) * 100 if _bp_strike > 0 else 0
+                    _bp_ann = _bp_yoc * (365 / _bp_dte) if _bp_dte > 0 else 0
+
+                    # Existing call income
+                    _existing_call_income = sum(
+                        float(p.entry_price) * 100 * abs(p.quantity)
+                        for p in _short_calls.get(sym, [])
+                    )
+                    _call_exp_days = max(
+                        (p.days_to_expiry for p in (position_reviews or [])
+                         if p.symbol == sym and p.option_type == "call"),
+                        default=30,
+                    )
+
+                    _strat_lines.append(
+                        f"  📊 {_C.cyan(_C.bold('COVERED STRANGLE'))}: {_C.bold(sym)} "
+                        f"— {shares} shares + {call_contracts}x short calls, "
+                        f"{_C.yellow(f'missing {uncovered_put_lots}x puts')}"
+                    )
+                    _strat_lines.append(
+                        f"    Add {_bp_contracts}x ${_bp.strike}P "
+                        f"exp {_fmt_exp(_bp.expiration)} ({_bp_dte}d) "
+                        f"@ ${_bp_mid:.2f} mid"
+                        f"{f' | δ{abs(_bp.delta):.2f}' if abs(_bp.delta) > 0.01 else ''}"
+                    )
+                    _strat_lines.append(
+                        f"    New income: ${_bp_premium:,.0f} premium "
+                        f"({_bp_ann:.0f}% ann on ${_bp_collateral:,.0f} collateral)"
+                    )
+                    _strat_lines.append(
+                        f"    Combined: calls ${_existing_call_income:,.0f} + puts ${_bp_premium:,.0f} "
+                        f"= ${_existing_call_income + _bp_premium:,.0f} total premium"
+                    )
+                    _assign_pct = (_cprice - _bp_strike) / _cprice * 100 if _cprice > 0 else 0
+                    _strat_lines.append(
+                        f"    If assigned: buy {_bp_contracts * 100} more {sym} @ ${_bp.strike} "
+                        f"({_assign_pct:.0f}% below current)"
+                    )
+                    _conc_post = (_symbol_exposure.get(sym, 0) + _bp_collateral) / _nlv_f
+                    if _conc_post > 0.10:
+                        _strat_lines.append(
+                            f"    {_C.yellow('!!')} Post-trade exposure {_conc_post:.1%} NLV — "
+                            f"reduce to {min(_bp_contracts, int(0.10 * _nlv_f / (_bp_strike * 100)))}x "
+                            f"to stay under 10%"
+                        )
+                    _strat_lines.append(
+                        f"    E*Trade: sell {_bp_contracts}x {sym} puts as separate order (Level 2+)"
+                    )
+
+            # ── COVERED STRANGLE: has puts but no calls ──
+            if uncovered_call_lots > 0 and has_puts and not has_calls and _s_chain.calls:
+                _otm_calls = [c for c in _s_chain.calls
+                              if float(c.strike) > _cprice * 1.05
+                              and c.expiration == _m_exp
+                              and float(c.bid) > 0]
+                if not _otm_calls:
+                    _otm_calls = [c for c in _s_chain.calls
+                                  if float(c.strike) > _cprice
+                                  and 0.10 <= abs(c.delta) <= 0.35
+                                  and 20 <= (c.expiration - date.today()).days <= 55
+                                  and float(c.bid) > 0]
+                if _otm_calls:
+                    if any(abs(c.delta) > 0.01 for c in _otm_calls[:3]):
+                        _best_call = min(_otm_calls, key=lambda c: abs(abs(c.delta) - 0.25))
+                    else:
+                        _best_call = min(_otm_calls, key=lambda c: abs(float(c.strike) / _cprice - 1.15))
+                    _bc = _best_call
+                    _bc_dte = (_bc.expiration - date.today()).days
+                    _bc_mid = float(_bc.mid)
+                    _bc_contracts = min(uncovered_call_lots, lots)
+                    _bc_premium = _bc_mid * 100 * _bc_contracts
+                    _above_pct = (float(_bc.strike) - _cprice) / _cprice * 100 if _cprice > 0 else 0
+                    _bc_ann = (_bc_mid / _cprice) * (365 / _bc_dte) * 100 if _bc_dte > 0 and _cprice > 0 else 0
+
+                    _existing_put_income = sum(
+                        float(p.entry_price) * 100 * abs(p.quantity)
+                        for p in _short_puts.get(sym, [])
+                    )
+
+                    _strat_lines.append(
+                        f"  📊 {_C.cyan(_C.bold('COVERED STRANGLE'))}: {_C.bold(sym)} "
+                        f"— {shares} shares + {put_contracts}x short puts, "
+                        f"{_C.yellow(f'missing {uncovered_call_lots}x calls')}"
+                    )
+                    _strat_lines.append(
+                        f"    Add {_bc_contracts}x ${_bc.strike}C "
+                        f"exp {_fmt_exp(_bc.expiration)} ({_bc_dte}d) "
+                        f"@ ${_bc_mid:.2f} mid"
+                        f"{f' | δ{abs(_bc.delta):.2f}' if abs(_bc.delta) > 0.01 else ''}"
+                    )
+                    _strat_lines.append(
+                        f"    New income: ${_bc_premium:,.0f} premium "
+                        f"({_bc_ann:.0f}% ann) | Cap at ${_bc.strike} ({_above_pct:.0f}% above)"
+                    )
+                    _strat_lines.append(
+                        f"    Combined: puts ${_existing_put_income:,.0f} + calls ${_bc_premium:,.0f} "
+                        f"= ${_existing_put_income + _bc_premium:,.0f} total premium"
+                    )
+                    _strat_lines.append(
+                        f"    E*Trade: sell {_bc_contracts}x {sym} covered calls (Level 1+)"
+                    )
+
+            # ── COLLAR: large unrealized gain, protect with protective put ──
+            if pnl_pct >= 0.25 and unrealized_gain >= 10_000 and _s_chain.puts:
+                # Find OTM protective put (buy, not sell)
+                _prot_puts = [p for p in _s_chain.puts
+                              if float(p.strike) < _cprice * 0.90
+                              and float(p.strike) > _cprice * 0.70
+                              and 60 <= (p.expiration - date.today()).days <= 200
+                              and float(p.ask) > 0]
+                if not _prot_puts:
+                    # Fallback to monthly puts
+                    _prot_puts = [p for p in _s_chain.puts
+                                  if float(p.strike) < _cprice * 0.90
+                                  and float(p.strike) > _cprice * 0.70
+                                  and 25 <= (p.expiration - date.today()).days <= 55
+                                  and float(p.ask) > 0]
+                if _prot_puts:
+                    _prot = min(_prot_puts, key=lambda p: abs(float(p.strike) / _cprice - 0.85))
+                    _pp = _prot
+                    _pp_dte = (_pp.expiration - date.today()).days
+                    _pp_ask = float(_pp.ask)
+                    _pp_mid = float(_pp.mid)
+                    _pp_strike = float(_pp.strike)
+                    _pp_contracts = lots
+                    _pp_cost = _pp_mid * 100 * _pp_contracts
+                    _pp_annual_cost = _pp_cost * (365 / _pp_dte) if _pp_dte > 0 else 0
+                    _position_value = _cprice * shares
+                    _cost_pct = (_pp_annual_cost / _position_value) * 100 if _position_value > 0 else 0
+
+                    # Calculate protection floor
+                    _floor = _pp_strike
+                    _locked_gain = float(_floor - float(basis)) * shares
+                    _max_loss_from_here = (_cprice - _floor) * shares
+
+                    # If they have calls, net premium reduces collar cost
+                    _call_offset = Decimal("0")
+                    if has_calls:
+                        for cp in _short_calls.get(sym, []):
+                            _call_offset += Decimal(str(cp.entry_price)) * 100 * abs(cp.quantity)
+
+                    _strat_lines.append(
+                        f"  🛡️ {_C.green(_C.bold('COLLAR'))}: {_C.bold(sym)} "
+                        f"— {shares} shares, unrealized {_C.green(f'+${unrealized_gain:,.0f}')} "
+                        f"({pnl_pct:+.0%})"
+                    )
+                    _strat_lines.append(
+                        f"    Buy {_pp_contracts}x ${_pp.strike}P "
+                        f"exp {_fmt_exp(_pp.expiration)} ({_pp_dte}d) "
+                        f"@ ${_pp_mid:.2f} mid"
+                        f"{f' | δ{abs(_pp.delta):.2f}' if abs(_pp.delta) > 0.01 else ''}"
+                    )
+                    _strat_lines.append(
+                        f"    Cost: ${_pp_cost:,.0f} ({_cost_pct:.1f}% ann drag on ${_position_value:,.0f} position)"
+                    )
+                    if _call_offset > 0:
+                        _net_cost = _pp_cost - float(_call_offset)
+                        _strat_lines.append(
+                            f"    Existing CC premium offsets: ${float(_call_offset):,.0f} "
+                            f"→ net collar cost: ${max(0, _net_cost):,.0f}"
+                        )
+                    _below_current = (_cprice - _floor) / _cprice * 100
+                    _strat_lines.append(
+                        f"    Floor: ${_pp.strike} ({_below_current:.0f}% below current) "
+                        f"→ locks in ${_locked_gain:,.0f} gain | max loss from here: ${_max_loss_from_here:,.0f}"
+                    )
+                    # Stress scenario
+                    _crash_20_price = _cprice * 0.80
+                    _without_collar = (_cprice - _crash_20_price) * shares
+                    _with_collar = min((_cprice - _floor) * shares, _without_collar) + _pp_cost
+                    _strat_lines.append(
+                        f"    If {sym} drops 20%: without collar −${_without_collar:,.0f} "
+                        f"| with collar −${_with_collar:,.0f} "
+                        f"({_C.green(f'saves ${_without_collar - _with_collar:,.0f}')})"
+                    )
+                    _strat_lines.append(
+                        f"    E*Trade: enter as {_C.bold('Collars')} order or buy puts separately (Level 2+)"
+                    )
+
+    if _strat_lines:
+        lines.append(f"\n🔧 {_C.magenta(_C.bold('STRATEGY UPGRADES'))} "
+                     f"— maximize income on existing holdings")
+        lines.extend(_strat_lines)
 
     # ── WATCH — position holds + earnings + tax ──
     watch_positions = []
@@ -2669,6 +3044,95 @@ def format_local_briefing(
                     f"  ⏳ {earnings_blocked} watchlist names reporting within 30d — "
                     f"limited deployment window. Watch for post-earnings entry points.")
             lines.extend(capital_lines)
+
+    # ── STRESS TEST — assignment exposure under drawdown scenarios ──
+    if portfolio_state and portfolio_state.positions and nlv > 0:
+        short_puts: list[tuple[str, float, int, float, str]] = []  # sym, strike, qty, dist_otm%, exp
+        stock_value = 0.0
+        cash_f = float(portfolio_state.cash_available)
+
+        # Build underlying price lookup from watchlist (option positions don't carry underlying price)
+        _und_prices: dict[str, float] = {}
+        for sym_w, _, hist_w, _, _ in watchlist_data:
+            if hist_w.current_price and float(hist_w.current_price) > 0:
+                _und_prices[sym_w] = float(hist_w.current_price)
+        # Also pull from stock positions in portfolio
+        for pos in portfolio_state.positions:
+            if pos.position_type == "long_stock" and float(pos.underlying_price) > 0:
+                _und_prices[pos.symbol] = float(pos.underlying_price)
+        # Scout opportunities have current prices for names not in watchlist
+        if scout_opps:
+            for s in scout_opps:
+                if s.ticker not in _und_prices and s.current_price > 0:
+                    _und_prices[s.ticker] = s.current_price
+
+        for pos in portfolio_state.positions:
+            if pos.position_type == "long_stock":
+                stock_value += float(pos.underlying_price) * pos.quantity
+            elif pos.position_type == "short_put":
+                strike_f = float(pos.strike)
+                und_f = _und_prices.get(pos.symbol, 0.0)
+                if und_f <= 0:
+                    # Last resort: estimate underlying from option profit (if profitable, stock above strike)
+                    und_f = strike_f * 1.05
+                qty = abs(pos.quantity)
+                dist = (und_f - strike_f) / und_f if und_f > 0 else 0
+                exp_str = pos.expiration.strftime("%b %d") if pos.expiration else "?"
+                short_puts.append((pos.symbol, strike_f, qty, dist, exp_str))
+
+        if short_puts:
+            total_put_obligation = sum(s * q * 100 for _, s, q, _, _ in short_puts)
+            coverage_ratio = cash_f / total_put_obligation if total_put_obligation > 0 else 99
+
+            stress_lines = [f"\n🔻 {_C.bold('STRESS TEST')} — assignment exposure if market drops"]
+
+            # Per-put detail line
+            put_detail = []
+            for sym, strike, qty, dist, exp in sorted(short_puts, key=lambda x: x[1] * x[2], reverse=True):
+                cost = strike * qty * 100
+                pct_nlv = cost / _nlv_f * 100
+                put_detail.append(
+                    f"  {sym:6s} {qty}x ${strike:<8.0f} {exp:6s}  "
+                    f"{dist:5.0%} OTM  ${cost:>9,.0f} ({pct_nlv:.1f}%)")
+            stress_lines.append(f"  {'─' * 56}")
+            stress_lines.extend(put_detail)
+            stress_lines.append(f"  {'─' * 56}")
+            stress_lines.append(
+                f"  Total put obligation: ${total_put_obligation:>10,.0f} | "
+                f"Cash: ${cash_f:>10,.0f} | "
+                f"Coverage: {coverage_ratio:.1f}x")
+
+            # Stress scenarios: -10%, -20%, -30%
+            for drop_pct in (0.10, 0.20, 0.30):
+                assigned_cost = 0.0
+                assigned_names: list[str] = []
+                for sym, strike, qty, dist, _ in short_puts:
+                    if dist <= drop_pct:
+                        assigned_cost += strike * qty * 100
+                        assigned_names.append(f"{sym} {qty}x")
+                cash_after = cash_f - assigned_cost
+                stock_loss = stock_value * drop_pct
+                nlv_after = _nlv_f - stock_loss - max(0, -cash_after)
+                tag = _C.green("OK") if cash_after > 0 else _C.red("SHORTFALL")
+                label = f"-{drop_pct:.0%}"
+                stress_lines.append(
+                    f"  {label:>4s}: "
+                    f"assigned ${assigned_cost:>9,.0f} → "
+                    f"cash {'$'+f'{cash_after:>+10,.0f}' if cash_after >= 0 else _C.red('$'+f'{cash_after:>+10,.0f}')} "
+                    f"| stocks {_C.red(f'-${stock_loss:,.0f}')} "
+                    f"| NLV ~${nlv_after:,.0f} [{tag}]")
+                if assigned_names and assigned_cost > 0:
+                    stress_lines.append(f"        assigns: {', '.join(assigned_names)}")
+
+            # Conservative advisory if coverage < 1.0
+            if coverage_ratio < 1.0:
+                stress_lines.append(
+                    f"  {_C.red('⚠ Cash covers only ' + f'{coverage_ratio:.0%}' + ' of put obligations — close winning puts to rebuild buffer')}")
+            elif coverage_ratio < 1.5:
+                stress_lines.append(
+                    f"  {_C.yellow('△ Cash coverage below 1.5x — consider closing 1-2 profitable puts')}")
+
+            lines.extend(stress_lines)
 
     # ── Nothing to do ──
     if not (urgent_positions or high_trades or medium_trades or low_trades
@@ -3133,6 +3597,7 @@ async def run_analysis_cycle(
         bench=bench,
         leap_candidates=leap_candidates,
         scout_opps=scout_opps,
+        etrade_session=etrade_session,
     )
     print(briefing)
 

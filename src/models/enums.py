@@ -101,13 +101,16 @@ class EntryDecision(Enum):
 
 
 class Strategy(Enum):
-    """The 6 wheel strategy types."""
+    """The 9 wheel strategy types."""
     MONTHLY_PUT = "monthly_put"
     WEEKLY_PUT = "weekly_put"
     STRANGLE = "strangle"
     EARNINGS_CRUSH = "earnings_crush"
     PUT_SPREAD = "put_spread"
     DIVIDEND_CAPTURE = "dividend_capture"
+    PMCC = "pmcc"
+    COVERED_STRANGLE = "covered_strangle"
+    COLLAR = "collar"
 
 
 class Urgency(Enum):
